@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "NPM Security Scanner Pro",
+  "version": "3.0.0",
+  "description": "Enterprise-grade NPM dependency security scanner with automatic threat detection, dependency confusion prevention, and real-time risk analysis.",
+  "permissions": [
+    "activeTab",
+    "notifications",
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://registry.npmjs.org/*",
+    "https://api.npmjs.org/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    },
+    "default_title": "NPM Security Scanner Pro"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icon128.png"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

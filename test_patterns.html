@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NPM Scanner Pattern Test</title>
+</head>
+
+<body>
+    <h1>NPM Scanner Pattern Test</h1>
+    <p>This page contains various script patterns to test the improved detection logic.</p>
+
+    <!-- 1. CDN Patterns -->
+    <h2>CDN Links</h2>
+    <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+
+    <!-- 2. Inline Code Patterns -->
+    <h2>Inline Code Patterns</h2>
+    <script>
+        // CommonJS / Node
+        const express = require('express');
+
+        // ES Modules
+        import axios from 'axios';
+
+        // Dynamic Import
+        import('moment').then(m => console.log(m));
+
+        // AMD / RequireJS
+        define(['async'], function (async) {
+            console.log('Async loaded via AMD');
+        });
+
+        // Webpack
+        __webpack_require__('core-js');
+
+        // SystemJS
+        System.import('rxjs');
+    </script>
+
+    <div id="results">
+        <h3>Expected Packages to be Detected:</h3>
+        <ul>
+            <li>react (from unpkg)</li>
+            <li>lodash (from jsdelivr)</li>
+            <li>jquery (from cdnjs)</li>
+            <li>express (from require)</li>
+            <li>axios (from import)</li>
+            <li>moment (from dynamic import)</li>
+            <li>async (from define)</li>
+            <li>core-js (from webpack)</li>
+            <li>rxjs (from System.import)</li>
+        </ul>
+    </div>
+</body>
+
+</html>

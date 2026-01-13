@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NPM Scanner Comprehensive Test</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding: 20px;
+            line-height: 1.6;
+            background: #f0f2f5;
+            color: #333;
+        }
+
+        h1,
+        h2 {
+            color: #2c3e50;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        code {
+            background: #e1e4e8;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+            color: #d63384;
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: bold;
+            color: white;
+        }
+
+        .tag.safe {
+            background-color: #28a745;
+        }
+
+        .tag.critical {
+            background-color: #dc3545;
+        }
+
+        .tag.warning {
+            background-color: #ffc107;
+            color: #333;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>NPM Security Scanner - Comprehensive Test Suite</h1>
+    <p>This page contains various code patterns to test the extension's detection logic.</p>
+
+    <div class="card">
+        <h2>1. CommonJS Patterns</h2>
+        <p>Testing <code>require()</code> detection.</p>
+        <ul>
+            <li><span class="tag safe">SAFE</span> <code>express</code></li>
+            <li><span class="tag critical">CRITICAL</span> <code>internal-auth-module</code></li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>2. ES Modules Patterns</h2>
+        <p>Testing <code>import</code> and <code>export</code> detection.</p>
+        <ul>
+            <li><span class="tag safe">SAFE</span> <code>react</code> (Static Import)</li>
+            <li><span class="tag safe">SAFE</span> <code>lodash</code> (Dynamic Import)</li>
+            <li><span class="tag critical">CRITICAL</span> <code>corp-billing-sdk</code> (Export from)</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>3. Bundler Specific Patterns</h2>
+        <p>Testing Webpack, SystemJS, and AMD.</p>
+        <ul>
+            <li><span class="tag safe">SAFE</span> <code>moment</code> (Webpack)</li>
+            <li><span class="tag safe">SAFE</span> <code>jquery</code> (AMD/RequireJS)</li>
+            <li><span class="tag critical">CRITICAL</span> <code>legacy-crm-core</code> (SystemJS)</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>4. CDN & URL Patterns</h2>
+        <p>Testing detection from script tags and URLs.</p>
+        <ul>
+            <li><span class="tag safe">SAFE</span> <code>vue</code> (unpkg)</li>
+            <li><span class="tag safe">SAFE</span> <code>bootstrap</code> (jsdelivr)</li>
+            <li><span class="tag safe">SAFE</span> <code>font-awesome</code> (cdnjs)</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>5. Advanced Naming Patterns</h2>
+        <p>Testing scoped packages and versioning.</p>
+        <ul>
+            <li><span class="tag safe">SAFE</span> <code>@angular/core</code> (Scoped)</li>
+            <li><span class="tag critical">CRITICAL</span> <code>@internal/secrets</code> (Scoped Internal)</li>
+            <li><span class="tag safe">SAFE</span> <code>next@13.4.0</code> (Versioned)</li>
+        </ul>
+    </div>
+
+    <!-- HIDDEN CODE BLOCKS FOR SCANNER DETECTION -->
+    <script>
+        // 1. CommonJS
+        try {
+            const express = require('express');
+            const auth = require('internal-auth-module');
+        } catch (e) { }
+
+        // 2. ES Modules (Dynamic)
+        try {
+            import('lodash').then(_ => console.log('loaded'));
+        } catch (e) { }
+
+        // 3. Webpack Simulation (Text Content for Regex)
+        // __webpack_require__('moment');
+        // require.ensure(['moment'], function() {});
+
+        // 4. AMD / RequireJS Simulation
+        // define(['jquery'], function($) {});
+
+        // 5. SystemJS Simulation
+        // System.import('legacy-crm-core');
+    </script>
+
+    <!-- ES Module Static Imports -->
+    <script type="module">
+
+        import React from 'react';
+
+        // export * from 'corp-billing-sdk'; // Commented out to prevent syntax error stopping script, regex should still catch it
+    </script>
+
+    <!-- Bundler Simulation (Explicit Text Content) -->
+    <script>
+        // Simulating text content that regex might catch even if not executed
+        const webpackCode = "__webpack_require__('moment')";
+        const amdCode = "define(['jquery'], function() {})";
+        const systemCode = "System.import('legacy-crm-core')";
+        const exportCode = "export * from 'corp-billing-sdk'";
+    </script>
+
+    <!-- CDN Links -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+
+    <!-- Scoped & Versioned -->
+    <script>
+        try {
+            const angular = require('@angular/core');
+            import('@internal/secrets');
+            const next = require('next@13.4.0');
+        } catch (e) { }
+    </script>
+
+</body>
+
+</html>
