@@ -47,10 +47,7 @@ Whether you're auditing a target, securing your own app, or hunting for supply c
 ### Terminal Dashboard
 *View critical risks and package details in a high-contrast terminal interface.*
 
-<!-- Placeholder for screenshot -->
-<div align="center">
-  <img src="icon128.png" alt="Extension Icon" width="128" height="128" />
-</div>
+<img width="545" height="609" alt="image" src="https://github.com/user-attachments/assets/7635752b-b2cf-45b0-8c7c-fb538915686f" />
 
 ---
 
