@@ -140,7 +140,6 @@ body {
 .status-indicator.active {
   background: var(--safe);
   box-shadow: 0 0 10px rgba(75, 226, 136, 0.95);
-  animation: pulse 1.4s ease-in-out infinite;
 }
 
 .live-label {
@@ -363,7 +362,6 @@ select:focus {
   border-radius: var(--radius-md);
   background: rgba(11, 21, 37, 0.82);
   margin-bottom: 10px;
-  animation: rise 240ms ease;
 }
 
 .section-header {
@@ -635,29 +633,6 @@ select:focus {
 ::-webkit-scrollbar-thumb {
   background: rgba(126, 175, 255, 0.38);
   border-radius: 999px;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-
-  50% {
-    transform: scale(0.82);
-  }
-}
-
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 @keyframes spin {

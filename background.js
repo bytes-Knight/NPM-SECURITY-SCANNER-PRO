@@ -54,6 +54,7 @@ class BackgroundState {
 }
 
 const state = new BackgroundState();
+const NETWORK_TIMEOUT_MS = 8000;
 
 // ============================================================================
 // BADGE MANAGEMENT
@@ -197,6 +198,20 @@ class NotificationManager {
 // ============================================================================
 
 class MessageHandler {
+  static async fetchWithTimeout(url, options = {}) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
+
+    try {
+      return await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   static async handleNotifyRisks(request, sender) {
     if (!sender.tab?.id) {
       console.error('No tab ID in sender');
@@ -302,76 +317,204 @@ class MessageHandler {
   }
 
   static async handleAnalyzePackage(request) {
-    const { name, sources } = request;
+    const { name, sources, ecosystem = 'npm' } = request;
 
     try {
-      // 1. Fetch from Registry
-      const res = await fetch(`https://registry.npmjs.org/${name}`);
-
-      if (res.status === 404) {
-        return {
-          name,
-          suspicious: true,
-          isUnregistered: true,
-          riskLevel: 'CRITICAL',
-          riskReasons: ['Package not found on npmjs.org - potential dependency confusion'],
-          sources
-        };
+      if (ecosystem === 'npm') {
+        return await MessageHandler.analyzeNpm(name, sources);
       }
 
-      if (res.status === 429) {
-        return { name, error: 'Rate Limit Exceeded (429)', sources };
-      }
-
-      if (!res.ok) {
-        return { name, error: `Registry Error (${res.status})`, sources };
-      }
-
-      const info = await res.json();
-
-      // 2. Fetch Downloads
-      let downloads = 0;
-      try {
-        const dlRes = await fetch(`https://api.npmjs.org/downloads/point/last-week/${name}`);
-        if (dlRes.ok) {
-          const dlData = await dlRes.json();
-          downloads = dlData.downloads;
-        }
-      } catch (e) { /* ignore download fetch error */ }
-
-      // 3. Assess Risk
-      const reasons = [];
-      let suspicious = false;
-      let level = 'LOW';
-
-      // Config constants (duplicated from content.js for now, or could be passed in)
-      const MIN_DOWNLOADS_SUSPICIOUS = 100;
-
-      if (downloads < MIN_DOWNLOADS_SUSPICIOUS && !info.repository) {
-        suspicious = true;
-        level = 'HIGH';
-        reasons.push('Low downloads + No Repo');
-      }
-
-      // Typosquatting check
-      if (/[0-9]{3,}|[il1][o0]/.test(info.name)) {
-        suspicious = true;
-        level = 'MEDIUM';
-        reasons.push('Suspicious name pattern');
-      }
-
-      return {
-        name,
-        version: info['dist-tags']?.latest || '?',
-        weeklyDownloads: downloads,
-        suspicious,
-        riskLevel: suspicious ? level : 'LOW',
-        riskReasons: reasons,
-        sources
-      };
+      return await MessageHandler.analyzeGeneric(ecosystem, name, sources);
 
     } catch (e) {
       return { name, error: e.message, sources };
+    }
+  }
+
+  static registryCache = new Map();
+  static registryCacheTtl = 5 * 60 * 1000;
+
+  static getCacheKey(ecosystem, name) {
+    return `${ecosystem}:${name}`;
+  }
+
+  static getCached(ecosystem, name) {
+    const key = this.getCacheKey(ecosystem, name);
+    const entry = this.registryCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > this.registryCacheTtl) {
+      this.registryCache.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  static setCached(ecosystem, name, value) {
+    const key = this.getCacheKey(ecosystem, name);
+    this.registryCache.set(key, { value, timestamp: Date.now() });
+  }
+
+  static async analyzeNpm(name, sources) {
+    const normalized = String(name || '').trim().toLowerCase();
+    if (!normalized) return { name, error: 'Invalid package name', sources };
+
+    const cached = this.getCached('npm', normalized);
+    if (cached) {
+      return { ...cached, sources };
+    }
+
+    const res = await this.fetchWithTimeout(`https://registry.npmjs.org/${normalized}`);
+
+    if (res.status === 404) {
+      const result = {
+        name: normalized,
+        suspicious: true,
+        isUnregistered: true,
+        riskLevel: 'CRITICAL',
+        riskReasons: ['Package not found on npmjs.org - potential dependency confusion'],
+        sources
+      };
+      this.setCached('npm', normalized, result);
+      return result;
+    }
+
+    if (res.status === 429) {
+      return { name: normalized, error: 'Rate Limit Exceeded (429)', sources };
+    }
+
+    if (!res.ok) {
+      return { name: normalized, error: `Registry Error (${res.status})`, sources };
+    }
+
+    const info = await res.json();
+
+    // Fetch Downloads
+    let downloads = 0;
+    try {
+      const dlRes = await this.fetchWithTimeout(`https://api.npmjs.org/downloads/point/last-week/${normalized}`);
+      if (dlRes.ok) {
+        const dlData = await dlRes.json();
+        downloads = dlData.downloads;
+      }
+    } catch (e) { /* ignore download fetch error */ }
+
+    // Assess Risk
+    const reasons = [];
+    let suspicious = false;
+    let level = 'LOW';
+
+    const MIN_DOWNLOADS_SUSPICIOUS = 100;
+    const LEVEL_RANK = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+    const bumpLevel = (next) => {
+      if (LEVEL_RANK[next] > LEVEL_RANK[level]) level = next;
+    };
+
+    if (downloads < MIN_DOWNLOADS_SUSPICIOUS && !info.repository) {
+      suspicious = true;
+      bumpLevel('HIGH');
+      reasons.push('Low downloads + No Repo');
+    }
+
+    // Typosquatting-ish patterns. Keep this conservative to reduce false positives.
+    const nameForHeuristics = String(info.name || normalized);
+    const hasLongNumber = /[0-9]{3,}/.test(nameForHeuristics);
+    // Confusable digit patterns like l0/10/i0/1o, not normal "io" or "lo" sequences.
+    const hasDigitConfusable = /(?:l0|10|i0|1o|0l|0i|o0|0o)/.test(nameForHeuristics);
+    if (hasLongNumber || hasDigitConfusable) {
+      suspicious = true;
+      bumpLevel('MEDIUM');
+      reasons.push('Suspicious name pattern');
+    }
+
+    const result = {
+      name: normalized,
+      version: info['dist-tags']?.latest || '?',
+      weeklyDownloads: downloads,
+      suspicious,
+      riskLevel: suspicious ? level : 'LOW',
+      riskReasons: reasons,
+      sources
+    };
+    this.setCached('npm', normalized, result);
+    return result;
+  }
+
+  static async analyzeGeneric(ecosystem, name, sources) {
+    const cached = this.getCached(ecosystem, name);
+    if (cached) {
+      return { ...cached, sources };
+    }
+
+    const exists = await this.checkRegistryExists(ecosystem, name);
+    if (!exists) {
+      const result = {
+        name,
+        suspicious: true,
+        isUnregistered: true,
+        riskLevel: 'CRITICAL',
+        riskReasons: [`Package not found on public ${ecosystem} registry - potential dependency confusion`],
+        sources
+      };
+      this.setCached(ecosystem, name, result);
+      return result;
+    }
+
+    const result = {
+      name,
+      suspicious: false,
+      isUnregistered: false,
+      riskLevel: 'LOW',
+      riskReasons: [],
+      sources
+    };
+    this.setCached(ecosystem, name, result);
+    return result;
+  }
+
+  static async checkRegistryExists(ecosystem, name) {
+    try {
+      switch (ecosystem) {
+        case 'pypi': {
+          const res = await this.fetchWithTimeout(`https://pypi.org/pypi/${name}/json`);
+          return res.ok;
+        }
+        case 'rubygems': {
+          const res = await this.fetchWithTimeout(`https://rubygems.org/api/v1/gems/${name}.json`);
+          return res.ok;
+        }
+        case 'nuget': {
+          const normalized = name.toLowerCase();
+          const res = await this.fetchWithTimeout(`https://api.nuget.org/v3-flatcontainer/${normalized}/index.json`);
+          return res.ok;
+        }
+        case 'maven': {
+          if (!name.includes(':')) return false;
+          const [groupId, artifactId] = name.split(':', 2);
+          const query = `g:"${groupId}" AND a:"${artifactId}"`;
+          const url = `https://search.maven.org/solrsearch/select?q=${encodeURIComponent(query)}&rows=1&wt=json`;
+          const res = await this.fetchWithTimeout(url);
+          if (!res.ok) return false;
+          const data = await res.json();
+          return (data.response && data.response.numFound > 0);
+        }
+        case 'composer': {
+          const res = await this.fetchWithTimeout(`https://repo.packagist.org/p2/${name}.json`);
+          return res.ok;
+        }
+        case 'golang': {
+          const encoded = encodeURIComponent(name).replace(/%2F/g, '/');
+          const res = await this.fetchWithTimeout(`https://proxy.golang.org/${encoded}/@v/list`);
+          return res.ok;
+        }
+        case 'crates': {
+          const res = await this.fetchWithTimeout(`https://crates.io/api/v1/crates/${name}`);
+          return res.ok;
+        }
+        default:
+          return false;
+      }
+    } catch (e) {
+      return true;
     }
   }
 }
@@ -385,8 +528,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     notifyRisks: MessageHandler.handleNotifyRisks,
     getResults: MessageHandler.handleGetResults,
     canScan: MessageHandler.handleCanScan,
-    recordScan: MessageHandler.handleRecordScan,
-    getSettings: MessageHandler.handleGetSettings,
     recordScan: MessageHandler.handleRecordScan,
     getSettings: MessageHandler.handleGetSettings,
     saveSettings: MessageHandler.handleSaveSettings,

@@ -20,6 +20,7 @@ const CONFIG = {
   // Crawler settings
   MAX_CRAWL_DEPTH: 3,
   MAX_FILES_PER_TYPE: 50,
+  MAX_DISCOVERED_URLS: 250,
   MAX_CONCURRENT_REQUESTS: 10, // For crawling
   MAX_CONCURRENT_SCANS: 5,     // For directory brute-forcing
   REQUEST_TIMEOUT: 8000,
@@ -505,8 +506,14 @@ class WebCrawler {
     });
     await Promise.all(dirPromises);
 
-    Logger.debug(`Discovered ${this.discoveredUrls.size} URLs`);
-    return Array.from(this.discoveredUrls);
+    const discovered = Array.from(this.discoveredUrls);
+    if (discovered.length > CONFIG.MAX_DISCOVERED_URLS) {
+      Logger.debug(`Discovered ${discovered.length} URLs, limiting to ${CONFIG.MAX_DISCOVERED_URLS} to avoid scan stalls`);
+      return discovered.slice(0, CONFIG.MAX_DISCOVERED_URLS);
+    }
+
+    Logger.debug(`Discovered ${discovered.length} URLs`);
+    return discovered;
   }
 }
 
@@ -522,6 +529,20 @@ class PackageScanner {
     this.cache = new Map();
     this.scannedFiles = 0;
     this.totalFiles = 0;
+  }
+
+  async fetchWithTimeout(url, options = {}) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT);
+
+    try {
+      return await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   addPackage(ecosystem, packageName, source) {
@@ -618,7 +639,7 @@ class PackageScanner {
 
   async scanJsFile(url) {
     try {
-      const response = await fetch(url, { cache: 'force-cache' });
+      const response = await this.fetchWithTimeout(url, { cache: 'force-cache' });
       if (!response.ok) return;
       const content = await response.text();
       this.scanContent(content, url);
@@ -638,7 +659,7 @@ class PackageScanner {
 
   async scanSourceMap(url) {
     try {
-      const response = await fetch(url);
+      const response = await this.fetchWithTimeout(url, { cache: 'force-cache' });
       if (!response.ok) return;
       const map = await response.json();
       if (map.sources) {
@@ -665,7 +686,7 @@ class PackageScanner {
     const baselineContent = new Map();
     for (const basePath of basePaths) {
       try {
-        const res = await fetch(basePath, { cache: 'force-cache' });
+        const res = await this.fetchWithTimeout(basePath, { cache: 'force-cache' });
         baselineContent.set(basePath, res.ok ? await res.text() : '');
       } catch (e) {
         baselineContent.set(basePath, '');
@@ -678,7 +699,7 @@ class PackageScanner {
         // 1. Fast HEAD check
         let headRes = null;
         try {
-          headRes = await fetch(path, { method: 'HEAD', cache: 'no-cache' });
+          headRes = await this.fetchWithTimeout(path, { method: 'HEAD', cache: 'no-cache' });
         } catch (e) {
           headRes = null;
         }
@@ -688,8 +709,9 @@ class PackageScanner {
 
         // 2. Validation GET (prevent false positives from custom 404s)
         // Fetch first 512 bytes to verify content
-        const getRes = await fetch(path, {
+        const getRes = await this.fetchWithTimeout(path, {
           method: 'GET',
+          cache: 'no-cache',
           headers: { 'Range': 'bytes=0-512' }
         });
 
@@ -780,7 +802,7 @@ class PackageScanner {
 
   async parsePackageJson(packagePath = '/package.json') {
     try {
-      const res = await fetch(packagePath);
+      const res = await this.fetchWithTimeout(packagePath, { cache: 'no-cache' });
       const text = await res.text();
       this.parsePackageJsonContent(text, packagePath);
     } catch (e) { /* ignore */ }
@@ -968,7 +990,7 @@ class PackageScanner {
   async parseDependencyFile(path) {
     const lower = path.toLowerCase();
     try {
-      const res = await fetch(path);
+      const res = await this.fetchWithTimeout(path, { cache: 'no-cache' });
       if (!res.ok) return;
       const content = await res.text();
       if (lower.endsWith('package.json')) this.parsePackageJsonContent(content, path);
@@ -1008,12 +1030,17 @@ class PackageScanner {
 
     try {
       // Delegate to background script to bypass CSP/CORS
-      const result = await chrome.runtime.sendMessage({
-        action: 'analyzePackage',
-        ecosystem,
-        name,
-        sources
-      });
+      const result = await Promise.race([
+        chrome.runtime.sendMessage({
+          action: 'analyzePackage',
+          ecosystem,
+          name,
+          sources
+        }),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Package analysis timed out')), CONFIG.REQUEST_TIMEOUT + 2000);
+        })
+      ]);
 
       if (result.error) {
         return { name, ecosystem, error: result.error, sources };
@@ -1030,7 +1057,7 @@ class PackageScanner {
   async fetchDownloads(name) {
     try {
       await this.rateLimiter.waitForSlot();
-      const res = await fetch(`https://api.npmjs.org/downloads/point/last-week/${name}`);
+      const res = await this.fetchWithTimeout(`https://api.npmjs.org/downloads/point/last-week/${name}`);
       if (res.ok) {
         const data = await res.json();
         return data.downloads;

@@ -45,7 +45,8 @@ const state = {
   pollTimer: null,
   activeTabId: null,
   extensionEnabled: true,
-  lastRenderedScanning: false
+  lastRenderedScanning: false,
+  lastUiSignature: ''
 };
 
 const utils = {
@@ -358,6 +359,10 @@ class UIRenderer {
   }
 
   static renderLoading(message = 'Scanning in progress...') {
+    const signature = `loading:${message}`;
+    if (state.lastUiSignature === signature) return;
+    state.lastUiSignature = signature;
+
     this.toggleDataControls(false);
     this.setStatus('SCANNING...');
     elements.scanResults.innerHTML = `
@@ -371,6 +376,10 @@ class UIRenderer {
   }
 
   static renderError(message, details = '') {
+    const signature = `error:${message}:${details}`;
+    if (state.lastUiSignature === signature) return;
+    state.lastUiSignature = signature;
+
     this.toggleDataControls(false);
     this.setStatus('ERROR');
     const detailsHtml = details ? `<p>${utils.escapeHtml(details)}</p>` : '';
@@ -385,6 +394,9 @@ class UIRenderer {
   }
 
   static renderDisabled() {
+    if (state.lastUiSignature === 'disabled') return;
+    state.lastUiSignature = 'disabled';
+
     this.toggleDataControls(false);
     this.setStatus('DISABLED');
     elements.scanResults.innerHTML = `
@@ -397,6 +409,10 @@ class UIRenderer {
   }
 
   static renderEmptyState(title, description) {
+    const signature = `empty:${title}:${description}`;
+    if (state.lastUiSignature === signature) return;
+    state.lastUiSignature = signature;
+
     elements.scanResults.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">_</div>
@@ -407,6 +423,9 @@ class UIRenderer {
   }
 
   static renderNoFilterMatches() {
+    if (state.lastUiSignature === 'no-filter-matches') return;
+    state.lastUiSignature = 'no-filter-matches';
+
     elements.scanResults.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">?</div>
@@ -445,6 +464,31 @@ class UIRenderer {
     const allSections = ScanDataModel.buildSections(results);
     const filteredSections = ScanDataModel.filterSections(allSections, state.filters);
     state.visibleSections = filteredSections;
+
+    const signatureParts = [
+      scanning ? '1' : '0',
+      String(results.url || ''),
+      String(state.filters.severity || 'ALL'),
+      String(state.filters.search || '').trim().toLowerCase()
+    ];
+
+    SECTION_ORDER.forEach((key) => {
+      const items = filteredSections[key] || [];
+      signatureParts.push(`${key}:${items.length}`);
+      items.forEach((item) => {
+        if (item.type === 'file') {
+          signatureParts.push(`f:${item.path}:${item.risk}:${item.status}:${item.contentType}`);
+          return;
+        }
+        signatureParts.push(`p:${item.name}:${item.version}:${item.badgeText}:${item.riskLevel}:${item.error || ''}:${item.weeklyDownloads || 0}:${item.maintainers || 0}`);
+      });
+    });
+
+    const signature = signatureParts.join('|');
+    if (state.lastUiSignature === signature) {
+      return;
+    }
+    state.lastUiSignature = signature;
 
     const totalVisible = ScanDataModel.getTotalItems(filteredSections);
     if (totalVisible === 0) {
@@ -701,6 +745,7 @@ function updateToggleState(isEnabled) {
     PopupScanManager.clearPolling();
     state.rawResults = null;
     state.visibleSections = { critical: [], high: [], medium: [], low: [], error: [] };
+    state.lastUiSignature = '';
     UIRenderer.renderDisabled();
   }
 }
@@ -735,7 +780,12 @@ async function handleCopyItem(sectionKey, index) {
     return;
   }
 
-  await copyToClipboard(ScanDataModel.itemToCopyText(item), 'Item copied to clipboard.');
+  if (item.type === 'package') {
+    await copyToClipboard(item.name, 'Package name copied.');
+    return;
+  }
+
+  await copyToClipboard(item.path, 'File path copied.');
 }
 
 async function handleCopySection(sectionKey) {
