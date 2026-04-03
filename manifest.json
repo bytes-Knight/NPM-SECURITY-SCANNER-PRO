@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NPM Security Scanner Pro",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Enterprise-grade NPM dependency security scanner with automatic threat detection, dependency confusion prevention, and real-time risk analysis.",
   "permissions": [
     "activeTab",
@@ -13,6 +13,13 @@
   "host_permissions": [
     "https://registry.npmjs.org/*",
     "https://api.npmjs.org/*",
+    "https://pypi.org/*",
+    "https://rubygems.org/*",
+    "https://api.nuget.org/*",
+    "https://search.maven.org/*",
+    "https://repo.packagist.org/*",
+    "https://proxy.golang.org/*",
+    "https://crates.io/*",
     "<all_urls>"
   ],
   "background": {

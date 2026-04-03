@@ -51,6 +51,34 @@ const CONFIG = {
     '/.yarnrc.yml',
     '/node_modules/',
 
+    // Python / PyPI
+    '/requirements.txt',
+    '/Pipfile',
+    '/Pipfile.lock',
+
+    // Ruby / RubyGems
+    '/Gemfile',
+    '/Gemfile.lock',
+
+    // .NET / NuGet
+    '/packages.config',
+
+    // Java / Maven / Gradle
+    '/pom.xml',
+    '/build.gradle',
+    '/build.gradle.kts',
+
+    // PHP / Composer
+    '/composer.json',
+
+    // Go
+    '/go.mod',
+    '/go.sum',
+
+    // Rust / Crates
+    '/Cargo.toml',
+    '/Cargo.lock',
+
     // Bundlers/Frameworks
     '/webpack.config.js',
     '/vite.config.js',
@@ -100,6 +128,20 @@ const CONFIG = {
     '.yarnrc': /--install|yarn-path/,
     '.yarnrc.yml': /nodeLinker:|yarnPath:/,
     'node_modules': /Index of|Parent Directory/i,
+    'requirements.txt': /^[a-zA-Z0-9_.-]+/m,
+    'Pipfile': /^\[(packages|dev-packages)\]/m,
+    'Pipfile.lock': /^\s*\{/,
+    'Gemfile': /^\s*source\s+['"]|^\s*gem\s+['"]/m,
+    'Gemfile.lock': /^GEM\b/m,
+    'packages.config': /<packages>|<package\s+id=/i,
+    'pom.xml': /<project[\s>]/i,
+    'build.gradle': /\bdependencies\b|\bplugins\b/i,
+    'build.gradle.kts': /\bdependencies\b|\bplugins\b/i,
+    'composer.json': /^\s*\{/,
+    'go.mod': /^\s*module\s+/m,
+    'go.sum': /^[a-zA-Z0-9_.-]+\s+[v0-9]/m,
+    'Cargo.toml': /^\s*\[(dependencies|dev-dependencies|build-dependencies)\]/m,
+    'Cargo.lock': /^\s*\[\[package\]\]/m,
     'webpack.config.js': /module\.exports|require\(|import /,
     'vite.config.js': /export default|defineConfig/,
     'vite.config.ts': /export default|defineConfig/,
@@ -108,11 +150,11 @@ const CONFIG = {
     'rollup.config.js': /export default/,
     'babel.config.js': /module\.exports/,
     'tsconfig.json': /^\s*\{/,
-    '.env': /^[A-Z_]+=/m,
-    '.env.local': /^[A-Z_]+=/m,
-    '.env.development': /^[A-Z_]+=/m,
-    '.env.production': /^[A-Z_]+=/m,
-    '.env.test': /^[A-Z_]+=/m,
+    '.env': /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=/m,
+    '.env.local': /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=/m,
+    '.env.development': /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=/m,
+    '.env.production': /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=/m,
+    '.env.test': /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=/m,
     'docker-compose.yml': /^version:|services:/,
     'Dockerfile': /^FROM /i
   },
@@ -234,7 +276,7 @@ class PackageNameExtractor {
   static normalizePackageName(pkgName) {
     if (!pkgName) return null;
 
-    let normalized = pkgName;
+    let normalized = pkgName.trim();
     if (normalized.startsWith('@')) {
       const match = normalized.match(/^(@[^/]+)\/(.+)$/);
       if (!match) return null;
@@ -248,9 +290,55 @@ class PackageNameExtractor {
 
     if (CONFIG.NODE_BUILTINS.has(normalized)) return null;
 
+    // npm package names are effectively lowercase; normalize early to reduce false negatives
+    normalized = normalized.toLowerCase();
+
     if (!/^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/.test(normalized)) return null;
 
     return normalized;
+  }
+
+  /**
+   * Extract an npm package name from a source-map "sources" entry by looking for
+   * a node_modules segment. This is much more reliable than treating the entire
+   * path as an import specifier.
+   */
+  static extractFromNodeModulesPath(value) {
+    if (!value || typeof value !== 'string') return null;
+
+    let cleaned = value.trim();
+    if (!cleaned) return null;
+
+    cleaned = this.stripQueryAndHash(cleaned).replace(/\\/g, '/');
+    const lower = cleaned.toLowerCase();
+
+    const markers = ['node_modules/', '/~/'];
+    let idx = -1;
+    let markerLen = 0;
+    let usedMarker = null;
+    for (const m of markers) {
+      const i = lower.lastIndexOf(m);
+      if (i > idx) {
+        idx = i;
+        markerLen = m.length;
+        usedMarker = m;
+      }
+    }
+    if (idx === -1) return null;
+
+    const rest = cleaned.slice(idx + markerLen);
+    const parts = rest.split('/').filter(Boolean);
+    if (parts.length === 0) return null;
+
+    let pkg = parts[0];
+    // In some frameworks, "~/" is an alias to the app root. Filter common app roots to reduce false positives.
+    if (usedMarker === '/~/' && CONFIG.INTERNAL_ALIAS_ROOTS.includes(pkg.toLowerCase())) return null;
+    if (pkg.startsWith('@')) {
+      if (parts.length < 2) return null;
+      pkg = `${parts[0]}/${parts[1]}`;
+    }
+
+    return this.normalizePackageName(pkg);
   }
 
   static extract(importPath) {
@@ -429,25 +517,35 @@ class WebCrawler {
 class PackageScanner {
   constructor() {
     this.packages = new Map();
+    this.npmPackageNames = new Set();
     this.rateLimiter = new RateLimiter(CONFIG.API_RATE_LIMIT, CONFIG.API_WINDOW);
     this.cache = new Map();
     this.scannedFiles = 0;
     this.totalFiles = 0;
   }
 
-  addPackage(packageName, source) {
-    if (!packageName) return;
+  addPackage(ecosystem, packageName, source) {
+    if (!ecosystem || !packageName) return;
+
+    // Normalize npm names to avoid case-sensitive registry lookups causing false results.
+    if (ecosystem === 'npm' && typeof packageName === 'string') {
+      packageName = packageName.trim().toLowerCase();
+    }
 
     // Filter out internal modules to prevent false positives
-    if (PackageNameExtractor.isInternalModule(packageName, this.packages)) {
-      Logger.debug(`Skipping internal module: ${packageName}`);
-      return;
+    if (ecosystem === 'npm') {
+      if (PackageNameExtractor.isInternalModule(packageName, this.npmPackageNames)) {
+        Logger.debug(`Skipping internal module: ${packageName}`);
+        return;
+      }
+      this.npmPackageNames.add(packageName);
     }
 
-    if (!this.packages.has(packageName)) {
-      this.packages.set(packageName, new Set());
+    const key = `${ecosystem}:${packageName}`;
+    if (!this.packages.has(key)) {
+      this.packages.set(key, { ecosystem, name: packageName, sources: new Set() });
     }
-    this.packages.get(packageName).add(source);
+    this.packages.get(key).sources.add(source);
   }
 
   async scanPageSource() {
@@ -488,7 +586,7 @@ class PackageScanner {
         // Also, check if the match is valid.
         if (match[1]) {
           const pkg = PackageNameExtractor.extract(match[1]);
-          this.addPackage(pkg, source);
+          this.addPackage('npm', pkg, source);
         }
       }
     }
@@ -513,7 +611,7 @@ class PackageScanner {
     urls.forEach(url => {
       const pkg = PackageNameExtractor.extract(url);
       if (pkg) {
-        this.addPackage(pkg, `CDN/URL: ${url}`);
+        this.addPackage('npm', pkg, `CDN/URL: ${url}`);
       }
     });
   }
@@ -545,8 +643,8 @@ class PackageScanner {
       const map = await response.json();
       if (map.sources) {
         map.sources.forEach(s => {
-          const pkg = PackageNameExtractor.extract(s);
-          this.addPackage(pkg, `Source Map: ${url}`);
+          const pkg = PackageNameExtractor.extractFromNodeModulesPath(s);
+          this.addPackage('npm', pkg, `Source Map: ${url}`);
         });
       }
     } catch (e) { /* ignore */ }
@@ -557,82 +655,99 @@ class PackageScanner {
     Logger.debug('Checking for exposed files (Concurrent Mode)...');
     const exposedFiles = [];
 
-    // 0. Establish Baseline (Soft 404 Detection)
-    let rootContent = '';
-    try {
-      const rootRes = await fetch('/', { cache: 'force-cache' });
-      rootContent = await rootRes.text();
-    } catch (e) { /* ignore */ }
+    const basePaths = new Set(['/']);
+    const currentPath = window.location.pathname || '/';
+    const baseDir = currentPath.endsWith('/') ? currentPath : currentPath.slice(0, currentPath.lastIndexOf('/') + 1);
+    if (baseDir && baseDir !== '/') {
+      basePaths.add(baseDir);
+    }
+
+    const baselineContent = new Map();
+    for (const basePath of basePaths) {
+      try {
+        const res = await fetch(basePath, { cache: 'force-cache' });
+        baselineContent.set(basePath, res.ok ? await res.text() : '');
+      } catch (e) {
+        baselineContent.set(basePath, '');
+      }
+    }
 
     // Helper to check a single file
-    const checkFile = async (path) => {
+    const checkFile = async (path, basePath) => {
       try {
         // 1. Fast HEAD check
-        const headRes = await fetch(path, { method: 'HEAD', cache: 'no-cache' });
+        let headRes = null;
+        try {
+          headRes = await fetch(path, { method: 'HEAD', cache: 'no-cache' });
+        } catch (e) {
+          headRes = null;
+        }
 
-        if (headRes.ok) {
-          // 2. Validation GET (prevent false positives from custom 404s)
-          // Fetch first 512 bytes to verify content
-          const getRes = await fetch(path, {
-            method: 'GET',
-            headers: { 'Range': 'bytes=0-512' }
+        const allowGet = !headRes || headRes.ok || headRes.status === 405 || headRes.status === 501;
+        if (!allowGet) return;
+
+        // 2. Validation GET (prevent false positives from custom 404s)
+        // Fetch first 512 bytes to verify content
+        const getRes = await fetch(path, {
+          method: 'GET',
+          headers: { 'Range': 'bytes=0-512' }
+        });
+
+        if (getRes.ok) {
+          const text = await getRes.text();
+
+          // Soft 404 Check: Compare with base content
+          // If the content is identical or extremely similar to the base, it's likely a SPA fallback
+          const baseContent = baselineContent.get(basePath) || '';
+          if (baseContent && (text === baseContent.slice(0, text.length) || text.includes('<!DOCTYPE html>'))) {
+            // Double check if it's NOT an expected HTML file
+            if (!path.endsWith('.html')) {
+              return; // False positive: Soft 404
+            }
+          }
+
+          const filename = path.split('/').pop() || 'node_modules';
+          const pattern = CONFIG.CONFIG_PATTERNS[filename];
+
+          // If we have a pattern, enforce it
+          if (pattern) {
+            if (!pattern.test(text)) {
+              return; // False positive: Content doesn't match expected format
+            }
+          } else {
+            // Fallback for files without specific patterns
+            const contentType = (getRes.headers.get('content-type') || '').toLowerCase();
+
+            // STRICT CHECK: Reject if Content-Type is HTML
+            if (contentType.includes('text/html')) {
+              return; // False positive
+            }
+
+            // STRICT CHECK: Reject if content looks like HTML
+            if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+              return; // False positive
+            }
+
+            const isHtml = contentType.includes('text/html') || text.includes('<!DOCTYPE html>');
+            const expectedJson = path.endsWith('.json') || path.endsWith('rc');
+
+            if (expectedJson && isHtml) {
+              return; // False positive
+            }
+          }
+
+          let risk = 'LOW';
+          if (filename.startsWith('.env') || filename === '.npmrc') risk = 'HIGH';
+          else if (filename.includes('lock') || filename === 'package.json' || filename === 'npm-shrinkwrap.json') risk = 'MEDIUM';
+
+          exposedFiles.push({
+            path,
+            risk,
+            status: getRes.status,
+            contentType: getRes.headers.get('content-type')
           });
 
-          if (getRes.ok) {
-            const text = await getRes.text();
-
-            // Soft 404 Check: Compare with root content
-            // If the content is identical or extremely similar to the homepage, it's likely a SPA fallback
-            if (rootContent && (text === rootContent.slice(0, text.length) || text.includes('<!DOCTYPE html>'))) {
-              // Double check if it's NOT an expected HTML file
-              if (!path.endsWith('.html')) {
-                return; // False positive: Soft 404
-              }
-            }
-
-            const filename = path.split('/').pop() || 'node_modules';
-            const pattern = CONFIG.CONFIG_PATTERNS[filename];
-
-            // If we have a pattern, enforce it
-            if (pattern) {
-              if (!pattern.test(text)) {
-                return; // False positive: Content doesn't match expected format
-              }
-            } else {
-              // Fallback for files without specific patterns
-              const contentType = (getRes.headers.get('content-type') || '').toLowerCase();
-
-              // STRICT CHECK: Reject if Content-Type is HTML
-              if (contentType.includes('text/html')) {
-                return; // False positive
-              }
-
-              // STRICT CHECK: Reject if content looks like HTML
-              if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
-                return; // False positive
-              }
-
-              const isHtml = contentType.includes('text/html') || text.includes('<!DOCTYPE html>');
-              const expectedJson = path.endsWith('.json') || path.endsWith('rc');
-
-              if (expectedJson && isHtml) {
-                return; // False positive
-              }
-            }
-
-            let risk = 'LOW';
-            if (path.includes('.env') || path.includes('npmrc')) risk = 'HIGH';
-            else if (path.includes('lock') || path === '/package.json') risk = 'MEDIUM';
-
-            exposedFiles.push({
-              path,
-              risk,
-              status: getRes.status,
-              contentType: getRes.headers.get('content-type')
-            });
-
-            if (path === '/package.json') await this.parsePackageJson();
-          }
+          await this.parseDependencyFile(path);
         }
       } catch (e) {
         // Ignore network errors (file not found)
@@ -643,8 +758,16 @@ class PackageScanner {
     const pool = [];
     const limit = CONFIG.MAX_CONCURRENT_SCANS;
 
-    for (const path of CONFIG.CONFIG_FILES) {
-      const p = checkFile(path).then(() => {
+    const candidatePaths = [];
+    for (const basePath of basePaths) {
+      const prefix = basePath === '/' ? '' : basePath.replace(/\/$/, '');
+      for (const path of CONFIG.CONFIG_FILES) {
+        candidatePaths.push({ path: `${prefix}${path}`, basePath });
+      }
+    }
+
+    for (const { path, basePath } of candidatePaths) {
+      const p = checkFile(path, basePath).then(() => {
         pool.splice(pool.indexOf(p), 1);
       });
       pool.push(p);
@@ -655,31 +778,230 @@ class PackageScanner {
     return exposedFiles;
   }
 
-  async parsePackageJson() {
+  async parsePackageJson(packagePath = '/package.json') {
     try {
-      const res = await fetch('/package.json');
-      const json = await res.json();
-      ['dependencies', 'devDependencies'].forEach(t => {
-        if (json[t]) Object.keys(json[t]).forEach(d => this.addPackage(d, '/package.json'));
+      const res = await fetch(packagePath);
+      const text = await res.text();
+      this.parsePackageJsonContent(text, packagePath);
+    } catch (e) { /* ignore */ }
+  }
+
+  parsePackageJsonContent(content, source) {
+    try {
+      const json = JSON.parse(content);
+      ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'].forEach(t => {
+        if (json[t]) Object.keys(json[t]).forEach(d => this.addPackage('npm', d, source));
       });
     } catch (e) { /* ignore */ }
   }
 
-  async analyzePackages() {
+  parseRequirementsTxt(content, source) {
+    const lines = (content || '').split(/\r?\n/);
+    lines.forEach(line => {
+      const stripped = line.trim();
+      if (!stripped || stripped.startsWith('#')) return;
+      if (stripped.startsWith('-')) return;
+      if (stripped.includes('://') || stripped.startsWith('git+')) return;
+      if (stripped.startsWith('-e ') || stripped.startsWith('--') || stripped.startsWith('-r ') || stripped.startsWith('-c ')) return;
+      let name = stripped.split(/[\s<=>~!]/)[0];
+      name = name.split('[')[0];
+      if (stripped.includes('egg=')) {
+        const egg = stripped.split('egg=')[1];
+        if (egg) name = egg;
+      }
+      if (name) this.addPackage('pypi', name, source);
+    });
+  }
+
+  parsePipfile(content, source) {
+    let inPackages = false;
+    let inDevPackages = false;
+    const lines = (content || '').split(/\r?\n/);
+    for (const line of lines) {
+      const stripped = line.trim();
+      if (!stripped || stripped.startsWith('#')) continue;
+      if (stripped.startsWith('[') && stripped.endsWith(']')) {
+        const section = stripped.slice(1, -1).toLowerCase();
+        inPackages = section === 'packages';
+        inDevPackages = section === 'dev-packages';
+        continue;
+      }
+      if ((inPackages || inDevPackages) && stripped.includes('=')) {
+        const name = stripped.split('=')[0].trim().replace(/^["']|["']$/g, '');
+        const value = stripped.split('=')[1].trim();
+        if (!this.isPypiValueAllowed(value)) continue;
+        if (name) this.addPackage('pypi', name, source);
+      }
+    }
+  }
+
+  parsePipfileLock(content, source) {
+    try {
+      const json = JSON.parse(content);
+      ['default', 'develop'].forEach(section => {
+        const deps = json[section] || {};
+        Object.keys(deps).forEach(name => {
+          const meta = deps[name];
+          if (this.isPypiValueAllowed(meta)) {
+            this.addPackage('pypi', name, source);
+          }
+        });
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  isPypiValueAllowed(value) {
+    if (value == null) return true;
+    if (typeof value === 'object') {
+      const keys = Object.keys(value);
+      for (const key of ['path', 'file', 'git', 'editable', 'url']) {
+        if (keys.includes(key)) return false;
+      }
+      return true;
+    }
+    const text = String(value).toLowerCase();
+    if (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('git+') || text.startsWith('git://')) return false;
+    if (text.startsWith('file:') || text.startsWith('link:') || text.startsWith('workspace:')) return false;
+    return true;
+  }
+
+  parseGemfile(content, source) {
+    const regex = /^\s*gem\s+['"]([^'"]+)['"]/gm;
+    let match;
+    while ((match = regex.exec(content || '')) !== null) {
+      const name = match[1];
+      if (name) this.addPackage('rubygems', name, source);
+    }
+  }
+
+  parseComposerJson(content, source) {
+    try {
+      const json = JSON.parse(content);
+      ['require', 'require-dev'].forEach(key => {
+        const reqs = json[key] || {};
+        Object.keys(reqs).forEach(name => {
+          if (!name || name === 'php') return;
+          if (name.startsWith('ext-') || name.startsWith('lib-')) return;
+          if (name.includes('/')) this.addPackage('composer', name, source);
+        });
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  parsePomXml(content, source) {
+    const regex = /<dependency>([\s\S]*?)<\/dependency>/g;
+    let match;
+    while ((match = regex.exec(content || '')) !== null) {
+      const block = match[1];
+      const group = /<groupId>(.*?)<\/groupId>/.exec(block);
+      const artifact = /<artifactId>(.*?)<\/artifactId>/.exec(block);
+      if (group && artifact) {
+        const name = `${group[1].trim()}:${artifact[1].trim()}`;
+        if (!name.includes('${')) this.addPackage('maven', name, source);
+      }
+    }
+  }
+
+  parseGradle(content, source) {
+    const regex = /['"]([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):[^'"]+['"]/g;
+    let match;
+    while ((match = regex.exec(content || '')) !== null) {
+      const name = `${match[1]}:${match[2]}`;
+      if (!name.includes('${')) this.addPackage('maven', name, source);
+    }
+  }
+
+  parseNuget(content, source) {
+    const refs = [];
+    const regex1 = /PackageReference\s+Include="([^"]+)"/g;
+    const regex2 = /<package\s+id="([^"]+)"/g;
+    let match;
+    while ((match = regex1.exec(content || '')) !== null) refs.push(match[1]);
+    while ((match = regex2.exec(content || '')) !== null) refs.push(match[1]);
+    refs.forEach(name => {
+      if (name) this.addPackage('nuget', name, source);
+    });
+  }
+
+  parseGoMod(content, source) {
+    const lines = (content || '').split(/\r?\n/);
+    let inRequire = false;
+    for (const line of lines) {
+      const stripped = line.trim();
+      if (stripped.startsWith('require (')) {
+        inRequire = true;
+        continue;
+      }
+      if (inRequire && stripped === ')') {
+        inRequire = false;
+        continue;
+      }
+      if (stripped.startsWith('require ')) {
+        const parts = stripped.replace(/^require\s+/, '').trim().split(/\s+/);
+        if (parts[0]) this.addPackage('golang', parts[0], source);
+      } else if (inRequire) {
+        const parts = stripped.split(/\s+/);
+        if (parts[0]) this.addPackage('golang', parts[0], source);
+      }
+    }
+  }
+
+  parseCargoToml(content, source) {
+    const lines = (content || '').split(/\r?\n/);
+    let inDeps = false;
+    for (const line of lines) {
+      const stripped = line.trim();
+      if (stripped.startsWith('[') && stripped.endsWith(']')) {
+        const section = stripped.slice(1, -1);
+        inDeps = ['dependencies', 'dev-dependencies', 'build-dependencies'].includes(section);
+        continue;
+      }
+      if (inDeps && stripped.includes('=') && !stripped.startsWith('#')) {
+        const name = stripped.split('=')[0].trim();
+        const value = stripped.split('=')[1].trim();
+        if (value.includes('path =') || value.includes('git =')) continue;
+        if (name) this.addPackage('crates', name, source);
+      }
+    }
+  }
+
+  async parseDependencyFile(path) {
+    const lower = path.toLowerCase();
+    try {
+      const res = await fetch(path);
+      if (!res.ok) return;
+      const content = await res.text();
+      if (lower.endsWith('package.json')) this.parsePackageJsonContent(content, path);
+      else if (lower.endsWith('requirements.txt')) this.parseRequirementsTxt(content, path);
+      else if (lower.endsWith('pipfile')) this.parsePipfile(content, path);
+      else if (lower.endsWith('pipfile.lock')) this.parsePipfileLock(content, path);
+      else if (lower.endsWith('gemfile')) this.parseGemfile(content, path);
+      else if (lower.endsWith('composer.json')) this.parseComposerJson(content, path);
+      else if (lower.endsWith('pom.xml')) this.parsePomXml(content, path);
+      else if (lower.endsWith('build.gradle') || lower.endsWith('build.gradle.kts')) this.parseGradle(content, path);
+      else if (lower.endsWith('packages.config') || lower.endsWith('.csproj')) this.parseNuget(content, path);
+      else if (lower.endsWith('go.mod')) this.parseGoMod(content, path);
+      else if (lower.endsWith('cargo.toml')) this.parseCargoToml(content, path);
+    } catch (e) { /* ignore */ }
+  }
+
+  async analyzePackages(onUpdate) {
     Logger.debug(`Analyzing ${this.packages.size} packages...`);
     const results = [];
 
-    for (const [name, sources] of this.packages) {
-      results.push(await this.analyzePackage(name, Array.from(sources)));
+    for (const pkg of this.packages.values()) {
+      results.push(await this.analyzePackage(pkg.ecosystem, pkg.name, Array.from(pkg.sources)));
+      if (onUpdate) onUpdate(results);
     }
     return results;
   }
 
-  async analyzePackage(name, sources) {
+  async analyzePackage(ecosystem, name, sources) {
     // Check cache
-    const cached = this.cache.get(name);
+    const cacheKey = `${ecosystem}:${name}`;
+    const cached = this.cache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CONFIG.CACHE_DURATION) {
-      return { ...cached.data, sources };
+      return { ...cached.data, sources, ecosystem };
     }
 
     await this.rateLimiter.waitForSlot();
@@ -688,19 +1010,20 @@ class PackageScanner {
       // Delegate to background script to bypass CSP/CORS
       const result = await chrome.runtime.sendMessage({
         action: 'analyzePackage',
+        ecosystem,
         name,
         sources
       });
 
       if (result.error) {
-        return { name, error: result.error, sources };
+        return { name, ecosystem, error: result.error, sources };
       }
 
-      this.cacheResult(name, result);
-      return result;
+      this.cacheResult(cacheKey, result);
+      return { ...result, ecosystem };
 
     } catch (e) {
-      return { name, error: e.message, sources };
+      return { name, ecosystem, error: e.message, sources };
     }
   }
 
@@ -746,8 +1069,9 @@ class PackageScanner {
 // MAIN EXECUTION
 // ============================================================================
 
-const scanner = new PackageScanner();
-const crawler = new WebCrawler(window.location.href);
+let scanner = new PackageScanner();
+let crawler = new WebCrawler(window.location.href);
+let scanSessionId = 0;
 
 // State Management
 let scanState = {
@@ -762,6 +1086,8 @@ let scanState = {
 
 // Auto-start scan
 async function runAutoScan() {
+  const sessionId = ++scanSessionId;
+
   // Check if extension is enabled
   const storage = await chrome.storage.local.get(['extensionEnabled']);
   const isEnabled = storage.extensionEnabled !== false; // default to true
@@ -775,21 +1101,40 @@ async function runAutoScan() {
   if (scanState.scanning || scanState.complete) return;
 
   scanState.scanning = true;
+  scanState.complete = false;
+  scanState.error = null;
+  scanState.url = window.location.href;
   Logger.debug('Auto-scan initiated...');
 
   try {
     // 1. Scan Page Source
     await scanner.scanPageSource();
+    if (sessionId !== scanSessionId) return;
 
     // 2. Crawl & Scan Scripts
     const urls = await crawler.discoverAllUrls();
     await scanner.scanAllDiscoveredFiles(urls);
+    if (sessionId !== scanSessionId) return;
 
     // 3. Check Exposed Files
     const exposedFiles = await scanner.checkExposedFiles();
+    if (sessionId !== scanSessionId) return;
+    scanState.exposedFiles = exposedFiles;
 
-    // 4. Analyze Packages
-    const packageResults = await scanner.analyzePackages();
+    // 4. Analyze Packages (incremental)
+    const packageResults = await scanner.analyzePackages((partial) => {
+      if (sessionId !== scanSessionId) return;
+      scanState.packages = partial.slice();
+      const suspiciousPackages = scanState.packages.filter(p => p.suspicious);
+      if (suspiciousPackages.length > 0 || scanState.exposedFiles.length > 0) {
+        chrome.runtime.sendMessage({
+          action: 'notifyRisks',
+          suspiciousPackages,
+          exposedFiles: scanState.exposedFiles
+        });
+      }
+    });
+    if (sessionId !== scanSessionId) return;
     const suspiciousPackages = packageResults.filter(p => p.suspicious);
 
     // Update State
@@ -809,10 +1154,24 @@ async function runAutoScan() {
     }
 
   } catch (e) {
+    if (sessionId !== scanSessionId) return;
     scanState.error = e.message;
     scanState.scanning = false;
     Logger.error('Scan failed:', e);
   }
+}
+
+function resetForRescan() {
+  scanSessionId += 1;
+  scanner = new PackageScanner();
+  crawler = new WebCrawler(window.location.href);
+
+  scanState.scanning = false;
+  scanState.complete = false;
+  scanState.packages = [];
+  scanState.exposedFiles = [];
+  scanState.error = null;
+  scanState.url = window.location.href;
 }
 
 // Start immediately (with slight delay for DOM)
@@ -823,6 +1182,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getScanStatus' || request.action === 'startScan') {
     // Return current state immediately
     sendResponse(scanState);
+    return true;
+  }
+
+  if (request.action === 'forceRescan') {
+    resetForRescan();
+    runAutoScan().catch((error) => {
+      Logger.error('Force rescan failed:', error);
+    });
+    sendResponse({ success: true, started: true });
     return true;
   }
 
@@ -839,9 +1207,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     // If disabled, clear results
     if (!isEnabled) {
+      scanSessionId += 1;
       scanState.packages = [];
       scanState.exposedFiles = [];
       scanState.complete = false;
+      scanState.scanning = false;
+      scanState.error = null;
     }
 
     sendResponse({ success: true, enabled: isEnabled });

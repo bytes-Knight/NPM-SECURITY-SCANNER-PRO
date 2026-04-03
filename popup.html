@@ -5,79 +5,101 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NPM Security Scanner Pro</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet">
   <link rel="stylesheet" href="popup.css">
 </head>
 
 <body>
-  <div class="app-container">
-    <!-- Header -->
-    <header class="header">
-      <div class="brand">
-        <span class="brand-icon">⚡</span>
-        <span class="brand-title">NPM SEC_SCAN</span>
-        <div id="statusIndicator" class="status-indicator active"></div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark">NS</div>
+        <div>
+          <h1 class="brand-title">NPM Security Scanner</h1>
+          <p class="brand-subtitle">Neo Security Console</p>
+        </div>
       </div>
-      <div class="toggle-container">
-        <label class="toggle-switch">
+
+      <div class="header-controls">
+        <div class="live-status">
+          <span id="statusIndicator" class="status-indicator active"></span>
+          <span id="toggleLabel" class="live-label">ON</span>
+        </div>
+
+        <label class="toggle-switch" aria-label="Toggle extension">
           <input type="checkbox" id="extensionToggle" checked>
           <span class="toggle-slider"></span>
         </label>
-        <span class="toggle-label" id="toggleLabel">ON</span>
       </div>
     </header>
 
-    <!-- Main Content -->
-    <main class="main-content">
-      <div id="view-scan" class="view-container active">
+    <section class="status-strip" aria-live="polite">
+      <div id="scanStatusText" class="status-chip">INITIALIZING...</div>
+      <div id="targetUrl" class="target-url">Target: waiting for active tab...</div>
+    </section>
 
-        <!-- Scan Controls (Removed) -->
-        <div class="scan-controls" style="display: none;">
-          <div class="scan-status" id="scanStatusText">SCANNING...</div>
-        </div>
+    <section id="statsGrid" class="stats-grid" style="display: none;">
+      <article class="stat-card">
+        <p id="statPackages" class="stat-value">0</p>
+        <p class="stat-label">Packages</p>
+      </article>
+      <article class="stat-card" id="statRiskCard">
+        <p id="statRisks" class="stat-value">0</p>
+        <p class="stat-label">Critical Risks</p>
+      </article>
+      <article class="stat-card" id="statFilesCard">
+        <p id="statFiles" class="stat-value">0</p>
+        <p class="stat-label">Exposed Files</p>
+      </article>
+    </section>
 
-        <!-- Stats Grid -->
-        <div id="statsGrid" class="stats-grid" style="display: none;">
-          <div class="stat-card">
-            <div id="statPackages" class="stat-value">0</div>
-            <div class="stat-label">Packages Found</div>
-          </div>
-          <div class="stat-card" id="statRiskCard">
-            <div id="statRisks" class="stat-value">0</div>
-            <div class="stat-label">Critical Risks</div>
-          </div>
-        </div>
+    <section id="actionControls" class="action-row" style="display: none;">
+      <button id="rescanBtn" class="btn btn-primary" type="button">Rescan</button>
+      <button id="copySummaryBtn" class="btn" type="button">Copy Summary</button>
+      <button id="saveResultsBtn" class="btn" type="button">Save Results</button>
+    </section>
 
-        <!-- Actions -->
-        <div id="actionControls" class="action-controls"
-          style="display: none; text-align: center; margin-bottom: 24px;">
-          <button id="saveResultsBtn" class="btn">SAVE RESULTS</button>
-        </div>
+    <section id="filterControls" class="filter-row" style="display: none;">
+      <label class="field">
+        <span class="field-label">Search</span>
+        <input id="searchInput" type="search" placeholder="Package, source, reason, file..." autocomplete="off">
+      </label>
 
-        <!-- Scan Results -->
-        <div id="scanResults" class="scan-results">
-          <div class="empty-state">
-            <div class="empty-icon">_</div>
-            <div>INITIATE SCAN TO BEGIN ANALYSIS</div>
-          </div>
+      <label class="field">
+        <span class="field-label">Severity</span>
+        <select id="severityFilter">
+          <option value="ALL">All</option>
+          <option value="CRITICAL">Critical</option>
+          <option value="HIGH">High</option>
+          <option value="MEDIUM">Medium</option>
+          <option value="LOW">Low</option>
+          <option value="ERROR">Errors</option>
+        </select>
+      </label>
+    </section>
+
+    <main class="results-wrap">
+      <div id="scanResults" class="scan-results">
+        <div class="empty-state">
+          <div class="empty-icon">_</div>
+          <h2>Waiting for scan data</h2>
+          <p>Open a target page and keep this popup open while scanning starts.</p>
         </div>
       </div>
     </main>
 
-    <!-- Footer -->
-    <footer style="text-align: center; padding: 12px; border-top: 1px solid var(--border-color); margin-top: auto;">
-      <div style="font-size: 11px; color: var(--text-muted);">
-        Made by <a href="https://bugcrowd.com/h/Bytes_Knight" target="_blank"
-          style="color: var(--accent-primary); text-decoration: none;">@Bytes_Knight</a>
-        | <a href="https://github.com/bytes-Knight" target="_blank"
-          style="color: var(--accent-primary); text-decoration: none;" title="GitHub">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align: middle;">
-            <path
-              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-          </svg>
-        </a>
-      </div>
+    <footer class="footer-meta">
+      <span>
+        Made by <a href="https://bugcrowd.com/h/Bytes_Knight" target="_blank" rel="noreferrer">@Bytes_Knight</a>
+      </span>
+      <span>
+        <a href="https://github.com/bytes-Knight" target="_blank" rel="noreferrer">GitHub</a>
+      </span>
     </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </div>
 
   <script src="popup.js"></script>

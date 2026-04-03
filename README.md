@@ -14,7 +14,7 @@ Whether you're auditing a target, securing your own app, or hunting for supply c
 - 🔍 **Deep Crawl**: Recursively crawls linked JavaScript files and source maps to uncover hidden dependencies that aren't immediately visible.
 - 🧾 **Page Source Scan**: Instantly extracts npm packages defined in the initial HTML and inline scripts.
 - 🧩 **Bundler Analysis**: Deconstructs Webpack, Vite, Parcel, and SystemJS bundles to find every single included library.
-- 🔓 **Exposed Files**: Automatically checks for sensitive files like `.env`, `package.json`, and `Dockerfile` that shouldn't be public.
+- 🔓 **Exposed Files**: Automatically checks for sensitive files like `.env`, `package.json`, registry configs, and lockfiles that shouldn't be public.
 
 ### 🧠 Intelligent Threat Detection
 - ⚠️ **Dependency Confusion**: Identifies internal package names that are NOT registered on the public npm registry - a critical supply chain vector.
@@ -38,7 +38,21 @@ Whether you're auditing a target, securing your own app, or hunting for supply c
    - 🟡 **Yellow**: Warnings found.
    - 🔴 **Red**: Critical risks detected.
 4. 🧩 **Open the Terminal**: Click the **NPM-SECURITY-SCANNER-PRO** icon to view the detailed "Hacker Terminal" dashboard.
-5. 📤 **Analyze and Export**: Review the findings and click **`SAVE RESULTS`** to generate a full HTML report.
+5. 📤 **Analyze and Export**: Review findings as they stream in and click **`SAVE RESULTS`** to generate a full HTML report.
+
+---
+
+## 🧪 Local Test Server
+This repo includes a demo server under `test-server/` that exposes registry configs and lockfiles for multiple ecosystems to validate the scanner:
+- npm, PyPI, Maven, RubyGems, NuGet, Composer, Go, Crates
+
+Quick start:
+```
+cd test-server
+npm install
+npm start
+```
+Then open `http://localhost:3000/` and run the extension on that page.
 
 ---
 
@@ -47,13 +61,23 @@ Whether you're auditing a target, securing your own app, or hunting for supply c
 ### Terminal Dashboard
 *View critical risks and package details in a high-contrast terminal interface.*
 
-<img width="545" height="609" alt="image" src="https://github.com/user-attachments/assets/7635752b-b2cf-45b0-8c7c-fb538915686f" />
+<!-- Placeholder for screenshot -->
+<div align="center">
+  <img src="icon128.png" alt="Extension Icon" width="128" height="128" />
+</div>
 
 ---
 
 ## 🧾 Changelog
 
-### v3.0.0 (Latest)
+### v3.0.1 (Latest)
+- **UI**: Redesigned popup to a modern "Neo Security" dashboard with improved information hierarchy.
+- **Feature**: Added copy toolkit (`Copy Summary`, per-section copy, per-item copy) for faster reporting workflows.
+- **Feature**: Added manual `Rescan` action in popup with new content-script `forceRescan` message handling.
+- **Feature**: Added client-side search and severity filters for large result sets.
+- **Improvement**: Updated popup interactions with toast feedback for copy/download actions.
+
+### v3.0.0
 - **Feature**: Complete UI overhaul to "Hacker Terminal" aesthetic.
 - **Feature**: Added **Deep Crawling** for recursive script analysis.
 - **Feature**: Implemented **Dependency Confusion** detection logic.

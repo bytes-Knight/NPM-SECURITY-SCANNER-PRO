@@ -1,794 +1,955 @@
 /**
  * NPM Security Scanner Pro - Popup Script
- * Simplified version - focuses on dependency confusion detection
+ * Neo Security UI with copy toolkit, filtering, and manual rescan.
  */
 
-// ============================================================================
-// DOM ELEMENTS
-// ============================================================================
-
 const elements = {
-  // scanBtn: document.getElementById('scanBtn'), // Removed
   scanStatusText: document.getElementById('scanStatusText'),
+  targetUrl: document.getElementById('targetUrl'),
   scanResults: document.getElementById('scanResults'),
   statsGrid: document.getElementById('statsGrid'),
   statPackages: document.getElementById('statPackages'),
   statRisks: document.getElementById('statRisks'),
+  statFiles: document.getElementById('statFiles'),
   statRiskCard: document.getElementById('statRiskCard'),
-  statusIndicator: document.getElementById('statusIndicator'),
-  saveResultsBtn: document.getElementById('saveResultsBtn'),
+  statFilesCard: document.getElementById('statFilesCard'),
   actionControls: document.getElementById('actionControls'),
+  filterControls: document.getElementById('filterControls'),
+  rescanBtn: document.getElementById('rescanBtn'),
+  copySummaryBtn: document.getElementById('copySummaryBtn'),
+  saveResultsBtn: document.getElementById('saveResultsBtn'),
+  searchInput: document.getElementById('searchInput'),
+  severityFilter: document.getElementById('severityFilter'),
   extensionToggle: document.getElementById('extensionToggle'),
-  toggleLabel: document.getElementById('toggleLabel')
+  toggleLabel: document.getElementById('toggleLabel'),
+  statusIndicator: document.getElementById('statusIndicator'),
+  toast: document.getElementById('toast')
 };
 
-// ============================================================================
-// UTILITIES
-// ============================================================================
+const SECTION_META = {
+  critical: { title: 'Critical Threats', color: '#ff4d5f' },
+  high: { title: 'High Risks', color: '#ff9f43' },
+  medium: { title: 'Medium Risks', color: '#ffd166' },
+  low: { title: 'Low Risks', color: '#4be288' },
+  error: { title: 'Analysis Errors', color: '#ff4d5f' }
+};
+
+const SECTION_ORDER = ['critical', 'high', 'medium', 'low', 'error'];
+
+const state = {
+  rawResults: null,
+  visibleSections: {
+    critical: [], high: [], medium: [], low: [], error: []
+  },
+  filters: { search: '', severity: 'ALL' },
+  pollTimer: null,
+  activeTabId: null,
+  extensionEnabled: true,
+  lastRenderedScanning: false
+};
 
 const utils = {
   escapeHtml(text) {
     const div = document.createElement('div');
-    div.textContent = text || '';
+    div.textContent = text == null ? '' : String(text);
     return div.innerHTML;
   },
 
   formatNumber(num) {
-    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-    return num.toString();
+    const value = Number(num || 0);
+    if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
+    if (value >= 1000) return `${(value / 1000).toFixed(1)}K`;
+    return `${value}`;
   },
 
-  delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  summarizeUrl(url) {
+    if (!url) return 'unknown';
+    try {
+      const parsed = new URL(url);
+      return `${parsed.hostname}${parsed.pathname !== '/' ? parsed.pathname : ''}`;
+    } catch {
+      return url;
+    }
   }
 };
 
-// ============================================================================
-// UI RENDERER
-// ============================================================================
+const toast = {
+  timer: null,
+  show(message, type = 'success') {
+    if (!elements.toast) return;
+    if (this.timer) clearTimeout(this.timer);
+
+    elements.toast.textContent = message;
+    elements.toast.className = `toast ${type === 'error' ? 'error' : ''} show`;
+
+    this.timer = setTimeout(() => {
+      elements.toast.className = 'toast';
+    }, 1800);
+  }
+};
+
+const clipboard = {
+  async copyText(text) {
+    if (!text) return false;
+
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // fallback below
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    }
+
+    document.body.removeChild(textarea);
+    return copied;
+  }
+};
+
+class ScanDataModel {
+  static hasValidPayload(results) {
+    return Boolean(results && Array.isArray(results.packages) && Array.isArray(results.exposedFiles));
+  }
+
+  static hasAnyData(results) {
+    if (!this.hasValidPayload(results)) return false;
+    return results.packages.length > 0 || results.exposedFiles.length > 0;
+  }
+
+  static calculateStats(results) {
+    const packages = Array.isArray(results?.packages) ? results.packages : [];
+    const exposedFiles = Array.isArray(results?.exposedFiles) ? results.exposedFiles : [];
+    const criticalRisks = packages.filter((pkg) => pkg && pkg.isUnregistered).length + exposedFiles.length;
+
+    return {
+      totalPackages: packages.length,
+      criticalRisks,
+      exposedFileCount: exposedFiles.length
+    };
+  }
+
+  static buildSections(results) {
+    const sections = { critical: [], high: [], medium: [], low: [], error: [] };
+    const packages = Array.isArray(results?.packages) ? results.packages : [];
+    const exposedFiles = Array.isArray(results?.exposedFiles) ? results.exposedFiles : [];
+
+    packages.forEach((pkg) => {
+      if (!pkg) return;
+
+      if (pkg.error) {
+        sections.error.push(this.mapPackage(pkg, 'error'));
+        return;
+      }
+
+      if (pkg.isUnregistered) {
+        sections.critical.push(this.mapPackage(pkg, 'critical'));
+        return;
+      }
+
+      const level = String(pkg.riskLevel || '').toUpperCase();
+      if (level === 'HIGH') {
+        sections.high.push(this.mapPackage(pkg, 'high'));
+        return;
+      }
+
+      if (level === 'MEDIUM') {
+        sections.medium.push(this.mapPackage(pkg, 'medium'));
+        return;
+      }
+
+      sections.low.push(this.mapPackage(pkg, 'low'));
+    });
+
+    exposedFiles.forEach((file) => {
+      if (!file) return;
+      const risk = String(file.risk || '').toUpperCase();
+      if (risk === 'HIGH') {
+        sections.high.push(this.mapFile(file, 'high'));
+      } else if (risk === 'MEDIUM') {
+        sections.medium.push(this.mapFile(file, 'medium'));
+      } else {
+        sections.low.push(this.mapFile(file, 'low'));
+      }
+    });
+
+    return sections;
+  }
+
+  static mapPackage(pkg, severity) {
+    const riskLevel = String(pkg.riskLevel || '').toUpperCase() || 'LOW';
+    let badgeText = 'OK';
+
+    if (severity === 'critical') {
+      badgeText = 'UNREGISTERED';
+    } else if (severity === 'error') {
+      badgeText = 'ERROR';
+    } else if (riskLevel === 'HIGH' || riskLevel === 'MEDIUM') {
+      badgeText = riskLevel;
+    }
+
+    return {
+      type: 'package',
+      severity,
+      name: String(pkg.name || 'unknown-package'),
+      version: pkg.version ? String(pkg.version) : '',
+      ecosystem: pkg.ecosystem ? String(pkg.ecosystem) : '',
+      badgeText,
+      riskLevel,
+      riskReasons: Array.isArray(pkg.riskReasons) ? pkg.riskReasons.map(String) : [],
+      sources: Array.isArray(pkg.sources) ? pkg.sources.map(String) : [],
+      weeklyDownloads: pkg.weeklyDownloads || 0,
+      maintainers: pkg.maintainers || 0,
+      error: pkg.error ? String(pkg.error) : ''
+    };
+  }
+
+  static mapFile(file, severity) {
+    return {
+      type: 'file',
+      severity,
+      path: String(file.path || 'unknown-path'),
+      risk: String(file.risk || 'LOW').toUpperCase(),
+      status: String(file.status ?? ''),
+      contentType: String(file.contentType || 'unknown')
+    };
+  }
+  static filterSections(sections, filters) {
+    const output = { critical: [], high: [], medium: [], low: [], error: [] };
+    const severity = String(filters?.severity || 'ALL').toUpperCase();
+    const term = String(filters?.search || '').trim().toLowerCase();
+
+    SECTION_ORDER.forEach((key) => {
+      const items = Array.isArray(sections[key]) ? sections[key] : [];
+
+      if (severity !== 'ALL' && severity.toLowerCase() !== key) {
+        output[key] = [];
+        return;
+      }
+
+      output[key] = items.filter((item) => {
+        if (!term) return true;
+        return this.itemMatches(item, term);
+      });
+    });
+
+    return output;
+  }
+
+  static itemMatches(item, term) {
+    const haystack = [];
+
+    if (item.type === 'package') {
+      haystack.push(item.name, item.version, item.ecosystem, item.badgeText, item.riskLevel);
+      haystack.push(...item.riskReasons);
+      haystack.push(...item.sources);
+      if (item.error) haystack.push(item.error);
+    } else {
+      haystack.push(item.path, item.risk, item.status, item.contentType);
+    }
+
+    return haystack.join(' ').toLowerCase().includes(term);
+  }
+
+  static getTotalItems(sections) {
+    return SECTION_ORDER.reduce((total, key) => total + (sections[key]?.length || 0), 0);
+  }
+
+  static itemToCopyText(item) {
+    if (item.type === 'file') {
+      return [
+        `[${item.risk}] Exposed File: ${item.path}`,
+        `Status: ${item.status}`,
+        `Content-Type: ${item.contentType}`
+      ].join('\n');
+    }
+
+    const lines = [`[${item.badgeText}] Package: ${item.name}${item.version ? `@${item.version}` : ''}`];
+    if (item.ecosystem) lines.push(`Ecosystem: ${item.ecosystem}`);
+    if (item.weeklyDownloads) lines.push(`Downloads/week: ${item.weeklyDownloads}`);
+    if (item.maintainers) lines.push(`Maintainers: ${item.maintainers}`);
+    if (item.error) lines.push(`Error: ${item.error}`);
+
+    if (item.riskReasons.length > 0) {
+      lines.push('Reasons:');
+      item.riskReasons.forEach((reason) => lines.push(`- ${reason}`));
+    }
+
+    if (item.sources.length > 0) {
+      lines.push('Sources:');
+      item.sources.forEach((source) => lines.push(`- ${source}`));
+    }
+
+    return lines.join('\n');
+  }
+
+  static sectionToCopyText(sectionKey, items) {
+    const meta = SECTION_META[sectionKey] || { title: sectionKey };
+    const lines = [`${meta.title} (${items.length})`, `Generated: ${new Date().toISOString()}`, ''];
+
+    items.forEach((item, index) => {
+      lines.push(`#${index + 1}`);
+      lines.push(this.itemToCopyText(item));
+      lines.push('');
+    });
+
+    return lines.join('\n').trim();
+  }
+
+  static summaryToCopyText(results) {
+    const stats = this.calculateStats(results);
+    const sections = this.buildSections(results);
+
+    const lines = [
+      'NPM Security Scanner Summary',
+      `Generated: ${new Date().toISOString()}`,
+      `Target: ${results?.url || 'unknown'}`,
+      `Total Packages: ${stats.totalPackages}`,
+      `Critical Risks: ${stats.criticalRisks}`,
+      `Exposed Files: ${stats.exposedFileCount}`,
+      ''
+    ];
+
+    const highPriority = [...sections.critical, ...sections.high];
+    if (highPriority.length > 0) {
+      lines.push('High Priority Findings:');
+      highPriority.slice(0, 20).forEach((item) => {
+        if (item.type === 'file') {
+          lines.push(`- [${item.risk}] ${item.path}`);
+          return;
+        }
+        lines.push(`- [${item.badgeText}] ${item.name}${item.version ? `@${item.version}` : ''}`);
+      });
+    } else {
+      lines.push('High Priority Findings: none');
+    }
+
+    return lines.join('\n');
+  }
+}
 
 class UIRenderer {
-  static renderLoading(message = 'DEEP_CRAWLING_IN_PROGRESS...') {
-    elements.statsGrid.style.display = 'none';
-    elements.actionControls.style.display = 'none';
-    elements.scanResults.innerHTML = `
-      <div class="loading-container">
-        <div class="terminal-loader">
-          > ${message}
-        </div>
-      </div>
-    `;
-    elements.scanStatusText.textContent = 'SCANNING...';
-    elements.scanStatusText.className = 'scan-status text-high';
+  static setStatus(text) {
+    elements.scanStatusText.textContent = text;
   }
 
-  static renderError(message, details = null) {
-    elements.statsGrid.style.display = 'none';
-    elements.actionControls.style.display = 'none';
+  static setTargetUrl(url) {
+    elements.targetUrl.textContent = `Target: ${utils.summarizeUrl(url)}`;
+  }
+
+  static toggleDataControls(show) {
+    elements.statsGrid.style.display = show ? 'grid' : 'none';
+    elements.actionControls.style.display = show ? 'flex' : 'none';
+    elements.filterControls.style.display = show ? 'grid' : 'none';
+  }
+
+  static renderLoading(message = 'Scanning in progress...') {
+    this.toggleDataControls(false);
+    this.setStatus('SCANNING...');
+    elements.scanResults.innerHTML = `
+      <div class="loading-state">
+        <div class="loader"></div>
+        <p>${utils.escapeHtml(message)}</p>
+      </div>
+    `;
+    elements.copySummaryBtn.disabled = true;
+    elements.saveResultsBtn.disabled = true;
+  }
+
+  static renderError(message, details = '') {
+    this.toggleDataControls(false);
+    this.setStatus('ERROR');
+    const detailsHtml = details ? `<p>${utils.escapeHtml(details)}</p>` : '';
     elements.scanResults.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon text-critical">!</div>
-        <div class="text-critical">ERROR: ${utils.escapeHtml(message)}</div>
-        ${details ? `<div class="text-muted mt-2">${utils.escapeHtml(details)}</div>` : ''}
+        <div class="empty-icon">!</div>
+        <h2>Error while scanning</h2>
+        <p>${utils.escapeHtml(message)}</p>
+        ${detailsHtml}
       </div>
     `;
-    elements.scanStatusText.textContent = 'ERROR';
-    elements.scanStatusText.className = 'scan-status text-critical';
   }
 
-  static renderEmptyState() {
-    elements.statsGrid.style.display = 'none';
-    elements.actionControls.style.display = 'none';
+  static renderDisabled() {
+    this.toggleDataControls(false);
+    this.setStatus('DISABLED');
+    elements.scanResults.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">II</div>
+        <h2>Extension Disabled</h2>
+        <p>Turn the extension on to resume scanning and analysis.</p>
+      </div>
+    `;
+  }
+
+  static renderEmptyState(title, description) {
     elements.scanResults.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">_</div>
-        <div>NO_PACKAGES_DETECTED</div>
-        <div class="text-muted mt-2">Target appears clean or obfuscated</div>
+        <h2>${utils.escapeHtml(title)}</h2>
+        <p>${utils.escapeHtml(description)}</p>
       </div>
     `;
-    elements.scanStatusText.textContent = 'NO_RESULTS';
-    elements.scanStatusText.className = 'scan-status text-muted';
   }
 
-  static updateStats(stats) {
-    elements.statsGrid.style.display = 'grid';
-    elements.actionControls.style.display = 'block';
-
-    // Animate numbers
-    this.animateValue(elements.statPackages, 0, stats.totalPackages, 1000);
-    this.animateValue(elements.statRisks, 0, stats.criticalRisks, 1000);
-
-    // Update risk card style
-    elements.statRiskCard.className = `stat-card ${stats.criticalRisks > 0 ? 'critical' : 'safe'}`;
-
-    elements.scanStatusText.textContent = 'SCAN_COMPLETE';
-    elements.scanStatusText.className = 'scan-status text-safe';
+  static renderNoFilterMatches() {
+    elements.scanResults.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">?</div>
+        <h2>No matches</h2>
+        <p>Adjust search keywords or severity filter to view findings.</p>
+      </div>
+    `;
   }
 
-  static animateValue(obj, start, end, duration) {
-    let startTimestamp = null;
-    const step = (timestamp) => {
-      if (!startTimestamp) startTimestamp = timestamp;
-      const progress = Math.min((timestamp - startTimestamp) / duration, 1);
-      obj.innerHTML = Math.floor(progress * (end - start) + start);
-      if (progress < 1) {
-        window.requestAnimationFrame(step);
-      }
-    };
-    window.requestAnimationFrame(step);
-  }
-
-  static renderResults(results) {
-    // Defensive check: ensure results and packages exist
-    if (!results || !results.packages || !Array.isArray(results.packages)) {
-      this.renderEmptyState();
+  static renderResults(results, options = {}) {
+    if (!ScanDataModel.hasValidPayload(results)) {
+      this.renderEmptyState('No scan data', 'Open a page and wait for the content script to provide results.');
       return;
     }
 
-    const stats = this.calculateStats(results);
-    this.updateStats(stats);
+    const scanning = Boolean(options.scanning);
+    state.lastRenderedScanning = scanning;
+    state.rawResults = results;
+
+    if (results.url) {
+      this.setTargetUrl(results.url);
+    }
+
+    const stats = ScanDataModel.calculateStats(results);
+    elements.statPackages.textContent = stats.totalPackages.toString();
+    elements.statRisks.textContent = stats.criticalRisks.toString();
+    elements.statFiles.textContent = stats.exposedFileCount.toString();
+    elements.statRiskCard.className = `stat-card ${stats.criticalRisks > 0 ? 'critical' : 'safe'}`;
+    elements.statFilesCard.className = 'stat-card files';
+
+    this.toggleDataControls(true);
+    elements.copySummaryBtn.disabled = !ScanDataModel.hasAnyData(results);
+    elements.saveResultsBtn.disabled = !ScanDataModel.hasAnyData(results);
+    this.setStatus(scanning ? 'SCANNING...' : 'SCAN COMPLETE');
+
+    const allSections = ScanDataModel.buildSections(results);
+    const filteredSections = ScanDataModel.filterSections(allSections, state.filters);
+    state.visibleSections = filteredSections;
+
+    const totalVisible = ScanDataModel.getTotalItems(filteredSections);
+    if (totalVisible === 0) {
+      const totalAll = ScanDataModel.getTotalItems(allSections);
+      if (totalAll === 0) {
+        this.renderEmptyState('No findings detected', 'No suspicious packages or exposed files were identified.');
+      } else {
+        this.renderNoFilterMatches();
+      }
+      return;
+    }
 
     let html = '';
-
-    // Show Critical Packages (Dependency Confusion) first
-    const criticalPackages = results.packages.filter(p => p.isUnregistered);
-
-    if (criticalPackages.length > 0) {
-      html += this.renderSection(
-        'CRITICAL_THREATS',
-        criticalPackages.length,
-        criticalPackages.map(pkg => this.renderPackageItem(pkg, 'critical'))
-      );
-    }
-
-    // Show ALL other packages (safe/registered)
-    const safePackages = results.packages.filter(p => !p.isUnregistered && !p.error);
-
-    if (safePackages.length > 0) {
-      html += this.renderSection(
-        'VERIFIED_PACKAGES',
-        safePackages.length,
-        safePackages.map(pkg => this.renderPackageItem(pkg, 'safe'))
-      );
-    }
-
-    // Show packages with errors
-    const errorPackages = results.packages.filter(p => p.error);
-
-    if (errorPackages.length > 0) {
-      html += this.renderSection(
-        'ANALYSIS_ERRORS',
-        errorPackages.length,
-        errorPackages.map(pkg => this.renderPackageItem(pkg, 'error'))
-      );
-    }
-
-    // Show Exposed Files
-    const exposedFiles = results.exposedFiles || [];
-    if (exposedFiles.length > 0) {
-      html += this.renderSection(
-        'EXPOSED_FILES',
-        exposedFiles.length,
-        exposedFiles.map(file => this.renderFileItem(file))
-      );
-    }
-
-    if (!html) {
-      html = `
-        <div class="empty-state">
-          <div class="empty-icon">_</div>
-          <div>NO_PACKAGES_DETECTED</div>
-        </div>
-      `;
-    }
+    SECTION_ORDER.forEach((sectionKey) => {
+      const items = filteredSections[sectionKey] || [];
+      if (items.length === 0) return;
+      html += this.renderSection(sectionKey, items);
+    });
 
     elements.scanResults.innerHTML = html;
   }
 
-  static calculateStats(results) {
-    // Defensive check
-    const packages = results?.packages || [];
-    const exposedFiles = results?.exposedFiles || [];
-    const criticalRisks = packages.filter(p => p.isUnregistered).length + exposedFiles.length;
+  static renderSection(sectionKey, items) {
+    const meta = SECTION_META[sectionKey] || { title: sectionKey, color: '#85a2cc' };
 
-    return {
-      totalPackages: packages.length,
-      criticalRisks
-    };
-  }
-
-  static renderSection(title, count, items) {
     return `
-      <div class="section">
+      <section class="section" data-section="${sectionKey}">
         <div class="section-header">
-          <span class="section-title">${title}</span>
-          <span class="badge">${count}</span>
+          <div class="section-title-wrap">
+            <h3 class="section-title" style="color:${meta.color}">${meta.title}</h3>
+            <span class="section-count" style="color:${meta.color}">${items.length}</span>
+          </div>
+          <button class="mini-btn" type="button" data-action="copy-section" data-section="${sectionKey}">Copy Section</button>
         </div>
-        <div class="items">
-          ${items.join('')}
+        <div class="item-list">
+          ${items.map((item, index) => this.renderItem(sectionKey, item, index)).join('')}
         </div>
-      </div>
+      </section>
     `;
   }
 
-  static renderPackageItem(pkg, severity) {
-    const badge = this.getBadge(pkg);
-    const sources = pkg.sources || [];
+  static renderItem(sectionKey, item, index) {
+    if (item.type === 'file') {
+      return this.renderFileItem(sectionKey, item, index);
+    }
+    return this.renderPackageItem(sectionKey, item, index);
+  }
+
+  static renderPackageItem(sectionKey, item, index) {
+    const reasons = item.riskReasons.length > 0
+      ? item.riskReasons.map((reason) => `<div class="detail-line">- ${utils.escapeHtml(reason)}</div>`).join('')
+      : '<div class="detail-line">- no explicit risk reason provided</div>';
+
+    const shownSources = item.sources.slice(0, 4);
+    const sources = shownSources.length > 0
+      ? shownSources.map((source) => `<div class="detail-line mono">${utils.escapeHtml(source)}</div>`).join('')
+      : '<div class="detail-line mono">source not provided</div>';
+
+    const hiddenCount = Math.max(item.sources.length - shownSources.length, 0);
+    const remaining = hiddenCount > 0 ? `<div class="detail-line mono">...and ${hiddenCount} more source locations</div>` : '';
+
+    const versionMeta = item.version ? `v${utils.escapeHtml(item.version)}` : 'version unknown';
+    const ecosystemTag = item.ecosystem ? `<span class="tag ecosystem">${utils.escapeHtml(item.ecosystem)}</span>` : '';
+
+    const extraMeta = [];
+    if (item.weeklyDownloads) extraMeta.push(`${utils.formatNumber(item.weeklyDownloads)} weekly downloads`);
+    if (item.maintainers) extraMeta.push(`${item.maintainers} maintainers`);
 
     return `
-      <div class="package-item ${severity}">
-        <div class="package-header">
+      <article class="finding-card" data-severity="${item.severity}">
+        <div class="finding-head">
           <div>
-            <span class="package-name">${utils.escapeHtml(pkg.name)}</span>
-            ${pkg.version ? `<span class="package-version">v${utils.escapeHtml(pkg.version)}</span>` : ''}
+            <h4 class="finding-name">${utils.escapeHtml(item.name)}</h4>
+            <p class="finding-meta">${versionMeta}${extraMeta.length > 0 ? ` | ${extraMeta.join(' | ')}` : ''}</p>
           </div>
-          ${badge}
-        </div>
-        <div class="package-details">
-          ${pkg.riskReasons ? pkg.riskReasons.map(r => `<div class="text-muted">> ${utils.escapeHtml(r)}</div>`).join('') : ''}
-          ${pkg.error ? `<div class="text-critical">> Error: ${utils.escapeHtml(pkg.error)}</div>` : ''}
-          <div class="text-secondary mt-1">
-            <strong>Found in:</strong>
+          <div class="actions-inline">
+            ${ecosystemTag}
+            <span class="tag ${item.severity}">${utils.escapeHtml(item.badgeText)}</span>
+            <button class="mini-btn" type="button" data-action="copy-item" data-section="${sectionKey}" data-index="${index}">Copy</button>
           </div>
-          ${sources.slice(0, 3).map(src => `<div class="text-muted source-path">> ${utils.escapeHtml(src)}</div>`).join('')}
-          ${sources.length > 3 ? `<div class="text-muted">... and ${sources.length - 3} more locations</div>` : ''}
         </div>
-      </div>
+        <div class="finding-body">
+          ${item.error ? `<div class="detail-line">Error: ${utils.escapeHtml(item.error)}</div>` : reasons}
+          <div class="detail-line">Sources:</div>
+          ${sources}
+          ${remaining}
+        </div>
+      </article>
     `;
   }
 
-  static getBadge(pkg) {
-    if (pkg.isUnregistered) return '<span class="badge critical">UNREGISTERED</span>';
-    if (pkg.error) return '<span class="badge critical">ERROR</span>';
-    return '<span class="badge safe">OK</span>';
-  }
-
-  static getPackageMeta(pkg) {
-    const items = [];
-    if (pkg.weeklyDownloads) items.push(`${utils.formatNumber(pkg.weeklyDownloads)} dl/wk`);
-    if (pkg.maintainers) items.push(`${pkg.maintainers} maintainers`);
-    return items.length ? `<div class="mb-1">${items.join(' | ')}</div>` : '';
-  }
-  static renderFileItem(file) {
-    const severity = file.risk === 'HIGH' ? 'critical' : 'warning';
+  static renderFileItem(sectionKey, item, index) {
     return `
-      <div class="package-item ${severity}">
-        <div class="package-header">
+      <article class="finding-card" data-severity="${item.severity}">
+        <div class="finding-head">
           <div>
-            <span class="package-name">${utils.escapeHtml(file.path)}</span>
-            <span class="package-version">${utils.escapeHtml(file.status)}</span>
+            <h4 class="finding-name">${utils.escapeHtml(item.path)}</h4>
+            <p class="finding-meta">Status ${utils.escapeHtml(item.status)} | ${utils.escapeHtml(item.contentType)}</p>
           </div>
-          <span class="badge ${severity}">${utils.escapeHtml(file.risk)}</span>
+          <div class="actions-inline">
+            <span class="tag ${item.severity}">${utils.escapeHtml(item.risk)}</span>
+            <button class="mini-btn" type="button" data-action="copy-item" data-section="${sectionKey}" data-index="${index}">Copy</button>
+          </div>
         </div>
-        <div class="package-details">
-          <div class="text-muted">Content-Type: ${utils.escapeHtml(file.contentType)}</div>
-        </div>
-      </div>
+      </article>
     `;
   }
 }
 
-// ============================================================================
-// SCAN MANAGER
-// ============================================================================
+const PopupScanManager = {
+  isRestrictedUrl(url) {
+    if (!url) return true;
+    return /^(chrome|edge|about|brave|moz-extension):/i.test(url);
+  },
 
-class PopupScanManager {
-  static async performScan(forceRescan = false) {
-    elements.scanBtn.disabled = true;
-
-    // Don't show loading if we're checking for cached results
-    if (forceRescan) {
-      UIRenderer.renderLoading();
+  clearPolling() {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
     }
+  },
 
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tabs[0]) throw new Error('No active tab found');
+  async getActiveTab() {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tabs[0] || null;
+  },
 
-      const tab = tabs[0];
-      if (tab.url.startsWith('chrome://')) throw new Error('Cannot scan system pages');
+  async sendMessage(tabId, payload) {
+    return chrome.tabs.sendMessage(tabId, payload);
+  },
 
-      // First, try to get cached results
-      // If forceRescan is false (default), we ALWAYS try to show cached data first
-      if (!forceRescan) {
-        try {
-          const cachedResponse = await chrome.tabs.sendMessage(tab.id, { action: 'getLastResults' });
+  async pollStatus(tabId, options = {}) {
+    this.clearPolling();
 
-          // If we have valid results, show them and STOP
-          if (cachedResponse && cachedResponse.packages && cachedResponse.packages.length > 0) {
-            UIRenderer.renderResults(cachedResponse);
-            elements.scanBtn.disabled = false;
-            return;
-          }
+    const initialLoadingMessage = options.initialLoadingMessage || 'Loading scan status...';
+    UIRenderer.renderLoading(initialLoadingMessage);
 
-          // If a scan is currently running, show loading and STOP
-          if (cachedResponse && cachedResponse.scanning) {
-            UIRenderer.renderLoading('SCAN_IN_PROGRESS...');
-            elements.scanBtn.disabled = false;
-            return;
-          }
-        } catch (e) {
-          // No cached results or content script not ready
+    const checkStatus = async () => {
+      try {
+        const response = await this.sendMessage(tabId, { action: 'getScanStatus' });
+
+        if (!response) {
+          UIRenderer.renderLoading('Waiting for content script. Refresh the target page.');
+          return false;
         }
+
+        if (response.enabled === false) {
+          updateToggleState(false);
+          UIRenderer.renderDisabled();
+          return true;
+        }
+
+        if (response.error) {
+          UIRenderer.renderError(response.error);
+          return true;
+        }
+
+        if (response.complete) {
+          UIRenderer.renderResults(response, { scanning: false });
+          return true;
+        }
+
+        if (response.scanning) {
+          if (ScanDataModel.hasAnyData(response)) {
+            UIRenderer.renderResults(response, { scanning: true });
+          } else {
+            UIRenderer.renderLoading('Scan in progress...');
+          }
+          return false;
+        }
+
+        if (ScanDataModel.hasValidPayload(response)) {
+          UIRenderer.renderResults(response, { scanning: false });
+          return true;
+        }
+
+        UIRenderer.renderLoading('Initializing scan...');
+        return false;
+      } catch (error) {
+        const message = String(error && error.message ? error.message : 'Unknown error');
+        if (message.includes('Could not establish connection') || message.includes('Receiving end does not exist')) {
+          UIRenderer.renderLoading('Content script not ready. Refresh the page.');
+          return false;
+        }
+
+        UIRenderer.renderError('Unable to read scan status', message);
+        return true;
       }
+    };
 
-      // Show loading for new scan
-      UIRenderer.renderLoading();
+    const complete = await checkStatus();
+    if (complete) return;
 
-      // Add artificial delay for "hacking" effect
-      await utils.delay(800);
-
-      const response = await chrome.tabs.sendMessage(tab.id, { action: 'scan' });
-
-      if (!response) {
-        throw new Error('Content script not loaded. Try refreshing the page.');
+    state.pollTimer = setInterval(async () => {
+      const done = await checkStatus();
+      if (done) {
+        this.clearPolling();
       }
+    }, 1000);
+  },
 
-      if (response.error) {
-        throw new Error(response.error);
-      }
-
-      // Check if scan is still in progress (backward compatibility)
-      if (response.scanning) {
-        UIRenderer.renderLoading('SCAN_IN_PROGRESS...');
+  async refresh(forceRescan = false) {
+    try {
+      const tab = await this.getActiveTab();
+      if (!tab) {
+        this.clearPolling();
+        UIRenderer.toggleDataControls(false);
+        UIRenderer.setStatus('NO TAB');
+        UIRenderer.renderEmptyState('No active tab', 'Open a web page and try again.');
         return;
       }
 
-      // Ensure response has valid structure
-      if (!response.packages) {
-        throw new Error('Invalid response from content script');
+      state.activeTabId = tab.id;
+      UIRenderer.setTargetUrl(tab.url || 'unknown');
+
+      if (this.isRestrictedUrl(tab.url || '')) {
+        this.clearPolling();
+        UIRenderer.toggleDataControls(false);
+        UIRenderer.setStatus('UNSUPPORTED');
+        UIRenderer.renderEmptyState('Unsupported page', 'System pages cannot be scanned. Open a regular website.');
+        return;
       }
 
-      UIRenderer.renderResults(response);
+      if (forceRescan) {
+        try {
+          await this.sendMessage(tab.id, { action: 'forceRescan' });
+          toast.show('Manual rescan started.');
+        } catch (error) {
+          const message = String(error && error.message ? error.message : 'Unknown error');
+          UIRenderer.renderError('Failed to start rescan', message);
+          return;
+        }
+      }
+
+      await this.pollStatus(tab.id, {
+        initialLoadingMessage: forceRescan ? 'Manual rescan started...' : 'Checking scan status...'
+      });
     } catch (error) {
-      console.error('Scan error:', error);
-
-      // Provide more helpful error messages
-      let errorMessage = error.message;
-      if (error.message.includes('Could not establish connection')) {
-        errorMessage = 'Content script not loaded. Please refresh the page and try again.';
-      } else if (error.message.includes('Receiving end does not exist')) {
-        errorMessage = 'Extension not ready. Please refresh the page.';
-      }
-
-      UIRenderer.renderError(errorMessage);
-    } finally {
-      elements.scanBtn.disabled = false;
+      const message = String(error && error.message ? error.message : 'Unknown error');
+      UIRenderer.renderError('Popup refresh failed', message);
     }
+  }
+};
+
+function updateToggleState(isEnabled) {
+  state.extensionEnabled = isEnabled;
+  elements.extensionToggle.checked = isEnabled;
+  elements.toggleLabel.textContent = isEnabled ? 'ON' : 'OFF';
+
+  if (isEnabled) {
+    elements.statusIndicator.classList.add('active');
+  } else {
+    elements.statusIndicator.classList.remove('active');
+    PopupScanManager.clearPolling();
+    state.rawResults = null;
+    state.visibleSections = { critical: [], high: [], medium: [], low: [], error: [] };
+    UIRenderer.renderDisabled();
   }
 }
 
-// ============================================================================
-// EVENT LISTENERS
-// ============================================================================
-
-// Scan Button - force a new scan (Removed)
-// elements.scanBtn.addEventListener('click', () => {
-//   PopupScanManager.performScan(true);
-// });
-
-// Save Results Button
-if (elements.saveResultsBtn) {
-  elements.saveResultsBtn.addEventListener('click', async () => {
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tabs[0]) return;
-
-      const response = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getScanStatus' });
-
-      if (response && response.packages) {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `npm-scan-results-${timestamp}.html`;
-
-        const htmlContent = generateHtmlReport(response);
-
-        const blob = new Blob([htmlContent], { type: 'text/html' });
-        const url = URL.createObjectURL(blob);
-
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
-    } catch (error) {
-      console.error('Failed to save results:', error);
-    }
-  });
+function debounce(fn, wait = 150) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
 }
 
-// Toggle Switch
-if (elements.extensionToggle) {
-  // Load saved state
-  chrome.storage.local.get(['extensionEnabled'], (result) => {
-    const isEnabled = result.extensionEnabled !== false; // default to true
-    elements.extensionToggle.checked = isEnabled;
-    elements.toggleLabel.textContent = isEnabled ? 'ON' : 'OFF';
-    updateToggleState(isEnabled);
-  });
+function rerenderFilteredResults() {
+  if (!state.rawResults || !ScanDataModel.hasValidPayload(state.rawResults)) return;
+  UIRenderer.renderResults(state.rawResults, { scanning: state.lastRenderedScanning });
+}
 
-  elements.extensionToggle.addEventListener('change', async (e) => {
-    const isEnabled = e.target.checked;
-    elements.toggleLabel.textContent = isEnabled ? 'ON' : 'OFF';
+async function copyToClipboard(text, successMessage) {
+  const copied = await clipboard.copyText(text);
+  if (copied) {
+    toast.show(successMessage);
+    return;
+  }
+  toast.show('Copy failed. Try again.', 'error');
+}
 
-    // Save state
+async function handleCopyItem(sectionKey, index) {
+  const items = state.visibleSections[sectionKey] || [];
+  const item = items[index];
+  if (!item) {
+    toast.show('Nothing to copy for this item.', 'error');
+    return;
+  }
+
+  await copyToClipboard(ScanDataModel.itemToCopyText(item), 'Item copied to clipboard.');
+}
+
+async function handleCopySection(sectionKey) {
+  const items = state.visibleSections[sectionKey] || [];
+  if (items.length === 0) {
+    toast.show('No items in this section.', 'error');
+    return;
+  }
+
+  await copyToClipboard(ScanDataModel.sectionToCopyText(sectionKey, items), 'Section copied to clipboard.');
+}
+
+async function handleCopySummary() {
+  if (!state.rawResults || !ScanDataModel.hasValidPayload(state.rawResults)) {
+    toast.show('No scan summary available.', 'error');
+    return;
+  }
+
+  await copyToClipboard(ScanDataModel.summaryToCopyText(state.rawResults), 'Summary copied to clipboard.');
+}
+
+async function getLatestResults() {
+  if (state.rawResults && ScanDataModel.hasValidPayload(state.rawResults)) {
+    return state.rawResults;
+  }
+
+  if (!state.activeTabId) return null;
+
+  try {
+    const response = await chrome.tabs.sendMessage(state.activeTabId, { action: 'getScanStatus' });
+    if (ScanDataModel.hasValidPayload(response)) {
+      return response;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function handleSaveResults() {
+  const data = await getLatestResults();
+  if (!data || !ScanDataModel.hasValidPayload(data)) {
+    toast.show('No results available to save.', 'error');
+    return;
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `npm-scan-results-${timestamp}.html`;
+  const htmlContent = generateHtmlReport(data);
+
+  const blob = new Blob([htmlContent], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  toast.show('Report downloaded.');
+}
+
+function bindEventListeners() {
+  elements.extensionToggle.addEventListener('change', async (event) => {
+    const isEnabled = Boolean(event.target.checked);
+
     await chrome.storage.local.set({ extensionEnabled: isEnabled });
-
-    // Update visual state
     updateToggleState(isEnabled);
 
-    // Notify content script
     try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs[0]) {
-        chrome.tabs.sendMessage(tabs[0].id, {
+      const tab = await PopupScanManager.getActiveTab();
+      if (tab?.id) {
+        await chrome.tabs.sendMessage(tab.id, {
           action: 'toggleExtension',
           enabled: isEnabled
         });
       }
-    } catch (error) {
-      console.debug('Could not notify content script:', error);
+    } catch {
+      // content script may not be available on current tab
+    }
+
+    if (isEnabled) {
+      await PopupScanManager.refresh(false);
+    }
+  });
+
+  elements.rescanBtn.addEventListener('click', async () => {
+    if (!state.extensionEnabled) {
+      toast.show('Turn extension ON before rescanning.', 'error');
+      return;
+    }
+
+    await PopupScanManager.refresh(true);
+  });
+
+  elements.copySummaryBtn.addEventListener('click', handleCopySummary);
+  elements.saveResultsBtn.addEventListener('click', handleSaveResults);
+
+  const debouncedSearch = debounce((value) => {
+    state.filters.search = value;
+    rerenderFilteredResults();
+  }, 120);
+
+  elements.searchInput.addEventListener('input', (event) => {
+    debouncedSearch(String(event.target.value || ''));
+  });
+
+  elements.severityFilter.addEventListener('change', (event) => {
+    state.filters.severity = String(event.target.value || 'ALL').toUpperCase();
+    rerenderFilteredResults();
+  });
+
+  elements.scanResults.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+
+    const action = button.getAttribute('data-action');
+    const section = button.getAttribute('data-section') || '';
+
+    if (action === 'copy-item') {
+      const index = Number(button.getAttribute('data-index') || '-1');
+      if (Number.isInteger(index) && index >= 0) {
+        await handleCopyItem(section, index);
+      }
+      return;
+    }
+
+    if (action === 'copy-section') {
+      await handleCopySection(section);
     }
   });
 }
 
-function updateToggleState(isEnabled) {
-  if (isEnabled) {
-    elements.statusIndicator.classList.add('active');
-    // Don't clear results when enabling - they'll be loaded/scanned
-  } else {
-    elements.statusIndicator.classList.remove('active');
-    // Show that extension is disabled
-    UIRenderer.renderEmptyState();
-    elements.statsGrid.style.display = 'none';
-    elements.actionControls.style.display = 'none';
+function generateHtmlReport(data) {
+  const stats = ScanDataModel.calculateStats(data);
+  const sections = ScanDataModel.buildSections(data);
+  const generatedAt = new Date().toLocaleString();
 
-    // Update scan results to show disabled state
-    elements.scanResults.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon text-muted">⏸</div>
-        <div>EXTENSION_DISABLED</div>
-        <div class="text-muted mt-2">Toggle ON to start scanning</div>
-      </div>
-    `;
-  }
-}
+  const escape = (value) => {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+  };
 
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
+  const sectionMarkup = SECTION_ORDER.map((key) => {
+    const items = sections[key] || [];
+    if (items.length === 0) return '';
 
-document.addEventListener('DOMContentLoaded', async () => {
-  // Auto-fetch results on open
-  try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tabs[0] && !tabs[0].url.startsWith('chrome://')) {
-
-      const checkStatus = async () => {
-        try {
-          const response = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getScanStatus' });
-
-          if (response) {
-            if (response.complete) {
-              UIRenderer.renderResults(response);
-              return true; // Done
-            } else if (response.scanning) {
-              UIRenderer.renderLoading('SCAN_IN_PROGRESS...');
-              return false; // Keep polling
-            } else if (response.error) {
-              UIRenderer.renderError(response.error);
-              return true; // Done (error)
-            }
-          } else {
-            // Response is undefined - likely old content script
-            UIRenderer.renderLoading('PLEASE_REFRESH_PAGE...');
-            return false;
-          }
-        } catch (e) {
-          // Content script might not be ready yet
-          UIRenderer.renderLoading('INITIALIZING...');
-          return false;
-        }
-        return false;
-      };
-
-      // Initial check
-      if (!await checkStatus()) {
-        // Poll every 1s
-        const interval = setInterval(async () => {
-          if (await checkStatus()) {
-            clearInterval(interval);
-          }
-        }, 1000);
+    const meta = SECTION_META[key];
+    const listItems = items.map((item) => {
+      if (item.type === 'file') {
+        return `<li><strong>${escape(item.path)}</strong> | ${escape(item.risk)} | ${escape(item.status)} | ${escape(item.contentType)}</li>`;
       }
 
-    } else {
-      UIRenderer.renderEmptyState();
-    }
-  } catch (error) {
-    console.debug('Could not load results:', error);
-    UIRenderer.renderEmptyState();
-  }
-});
+      return `<li><strong>${escape(item.name)}${item.version ? `@${escape(item.version)}` : ''}</strong> [${escape(item.badgeText)}]</li>`;
+    }).join('');
 
-function generateHtmlReport(data) {
-  const stats = UIRenderer.calculateStats(data);
-  const date = new Date().toLocaleString();
-
-  const criticalPackages = data.packages.filter(p => p.isUnregistered);
-  const safePackages = data.packages.filter(p => !p.isUnregistered && !p.error);
-  const errorPackages = data.packages.filter(p => p.error);
-  const exposedFiles = data.exposedFiles || [];
+    return `
+      <section style="margin-top:16px;">
+        <h3 style="margin:0 0 8px;color:${meta.color};">${meta.title} (${items.length})</h3>
+        <ul style="margin:0;padding-left:20px;line-height:1.6;">${listItems}</ul>
+      </section>
+    `;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NPM Security Scan Report</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <title>NPM Security Scanner Report</title>
   <style>
-    :root {
-      --bg-primary: #0d1117;
-      --bg-secondary: #000000;
-      --text-primary: #00ff41;
-      --text-secondary: #00cc33;
-      --text-muted: #005511;
-      --accent-primary: #00ff41;
-      --critical: #ff0033;
-      --high: #ff6600;
-      --medium: #ffcc00;
-      --safe: #00ff41;
-      --border-color: #004411;
-    }
-
-    body {
-      background-color: var(--bg-primary);
-      color: var(--text-primary);
-      font-family: 'JetBrains Mono', monospace;
-      margin: 0;
-      padding: 40px;
-      line-height: 1.6;
-    }
-
-    .container {
-      max-width: 1000px;
-      margin: 0 auto;
-      border: 1px solid var(--border-color);
-      padding: 40px;
-      background: var(--bg-secondary);
-      box-shadow: 0 0 20px rgba(0, 255, 65, 0.1);
-    }
-
-    header {
-      border-bottom: 2px solid var(--border-color);
-      padding-bottom: 20px;
-      margin-bottom: 40px;
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-    }
-
-    h1 {
-      margin: 0;
-      font-size: 24px;
-      text-transform: uppercase;
-      letter-spacing: 2px;
-      text-shadow: 0 0 10px rgba(0, 255, 65, 0.4);
-    }
-
-    .meta {
-      color: var(--text-secondary);
-      font-size: 14px;
-    }
-
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 20px;
-      margin-bottom: 40px;
-    }
-
-    .stat-card {
-      background: rgba(0, 20, 0, 0.3);
-      border: 1px solid var(--border-color);
-      padding: 20px;
-      text-align: center;
-    }
-
-    .stat-value {
-      font-size: 36px;
-      font-weight: bold;
-      margin-bottom: 5px;
-    }
-
-    .stat-label {
-      font-size: 12px;
-      text-transform: uppercase;
-      color: var(--text-secondary);
-      letter-spacing: 1px;
-    }
-
-    .section {
-      margin-bottom: 40px;
-    }
-
-    .section-title {
-      font-size: 18px;
-      border-bottom: 1px solid var(--border-color);
-      padding-bottom: 10px;
-      margin-bottom: 20px;
-      color: var(--text-primary);
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .badge {
-      font-size: 12px;
-      padding: 2px 8px;
-      border: 1px solid currentColor;
-      border-radius: 4px;
-    }
-
-    .item {
-      border: 1px solid var(--border-color);
-      margin-bottom: 15px;
-      background: rgba(0, 20, 0, 0.2);
-      transition: transform 0.2s;
-    }
-
-    .item:hover {
-      transform: translateX(5px);
-      border-color: var(--accent-primary);
-    }
-
-    .item-header {
-      padding: 15px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: rgba(0, 0, 0, 0.2);
-    }
-
-    .item-name {
-      font-weight: bold;
-      font-size: 16px;
-    }
-
-    .item-details {
-      padding: 15px;
-      border-top: 1px solid var(--border-color);
-      font-size: 14px;
-      color: var(--text-secondary);
-    }
-
-    .text-critical { color: var(--critical); }
-    .text-high { color: var(--high); }
-    .text-safe { color: var(--safe); }
-    .text-muted { color: var(--text-muted); }
-
-    .critical-border { border-left: 4px solid var(--critical); }
-    .safe-border { border-left: 4px solid var(--safe); }
-    .warning-border { border-left: 4px solid var(--medium); }
-
-    .source-path {
-      font-family: monospace;
-      margin-top: 5px;
-      color: var(--text-muted);
-      word-break: break-all;
-    }
+    body { margin: 0; padding: 24px; font-family: "Space Grotesk", sans-serif; color: #e8f2ff; background: #08111d; }
+    .container { max-width: 980px; margin: 0 auto; border: 1px solid #35517a; border-radius: 12px; padding: 24px; background: #0c1729; }
+    .meta { color: #9db6d8; font-size: 13px; }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+    .card { border: 1px solid #35517a; border-radius: 10px; padding: 10px; background: #13243d; }
+    .value { margin: 0; font-size: 26px; font-weight: 700; }
+    .label { margin: 4px 0 0; font-size: 11px; text-transform: uppercase; color: #9db6d8; }
   </style>
 </head>
 <body>
   <div class="container">
-    <header>
-      <div>
-        <h1>NPM Security Scan Report</h1>
-        <div style="margin-top: 10px; color: var(--text-secondary);">Target: ${data.url || 'Unknown'}</div>
-      </div>
-      <div class="meta">Generated: ${date}</div>
-    </header>
+    <h1 style="margin:0;">NPM Security Scanner Report</h1>
+    <p class="meta">Generated: ${escape(generatedAt)}</p>
+    <p class="meta">Target: ${escape(data.url || 'unknown')}</p>
 
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-value">${stats.totalPackages}</div>
-        <div class="stat-label">Total Packages</div>
-      </div>
-      <div class="stat-card" style="${stats.criticalRisks > 0 ? 'border-color: var(--critical); box-shadow: 0 0 10px rgba(255, 0, 51, 0.2);' : ''}">
-        <div class="stat-value" style="color: ${stats.criticalRisks > 0 ? 'var(--critical)' : 'var(--safe)'}">${stats.criticalRisks}</div>
-        <div class="stat-label">Critical Risks</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${exposedFiles.length}</div>
-        <div class="stat-label">Exposed Files</div>
-      </div>
+    <div class="stats">
+      <div class="card"><p class="value">${stats.totalPackages}</p><p class="label">Packages</p></div>
+      <div class="card"><p class="value">${stats.criticalRisks}</p><p class="label">Critical Risks</p></div>
+      <div class="card"><p class="value">${stats.exposedFileCount}</p><p class="label">Exposed Files</p></div>
     </div>
 
-    ${criticalPackages.length > 0 ? `
-      <div class="section">
-        <div class="section-title">
-          <span class="text-critical">⚠️ CRITICAL THREATS</span>
-          <span class="badge" style="color: var(--critical); border-color: var(--critical)">${criticalPackages.length}</span>
-        </div>
-        ${criticalPackages.map(pkg => `
-          <div class="item critical-border">
-            <div class="item-header">
-              <div>
-                <span class="item-name text-critical">${utils.escapeHtml(pkg.name)}</span>
-                <span style="color: var(--text-muted)">v${utils.escapeHtml(pkg.version || '?')}</span>
-              </div>
-              <span class="badge" style="color: var(--critical); border-color: var(--critical)">UNREGISTERED</span>
-            </div>
-            <div class="item-details">
-              ${pkg.riskReasons ? pkg.riskReasons.map(r => `<div class="text-critical">> ${utils.escapeHtml(r)}</div>`).join('') : ''}
-              <div style="margin-top: 10px; font-weight: bold; color: var(--text-secondary)">Found in:</div>
-              ${(pkg.sources || []).map(src => `<div class="source-path">> ${utils.escapeHtml(src)}</div>`).join('')}
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    ` : ''}
-
-    ${exposedFiles.length > 0 ? `
-      <div class="section">
-        <div class="section-title">
-          <span class="text-high">🔓 EXPOSED FILES</span>
-          <span class="badge" style="color: var(--high); border-color: var(--high)">${exposedFiles.length}</span>
-        </div>
-        ${exposedFiles.map(file => `
-          <div class="item warning-border">
-            <div class="item-header">
-              <span class="item-name text-high">${utils.escapeHtml(file.path)}</span>
-              <span class="badge" style="color: var(--high); border-color: var(--high)">${utils.escapeHtml(file.risk)}</span>
-            </div>
-            <div class="item-details">
-              <div>Status: ${utils.escapeHtml(file.status)}</div>
-              <div>Type: ${utils.escapeHtml(file.contentType)}</div>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    ` : ''}
-
-    ${safePackages.length > 0 ? `
-      <div class="section">
-        <div class="section-title">
-          <span class="text-safe">✓ VERIFIED PACKAGES</span>
-          <span class="badge" style="color: var(--safe); border-color: var(--safe)">${safePackages.length}</span>
-        </div>
-        ${safePackages.map(pkg => `
-          <div class="item safe-border">
-            <div class="item-header">
-              <div>
-                <span class="item-name text-safe">${utils.escapeHtml(pkg.name)}</span>
-                <span style="color: var(--text-muted)">v${utils.escapeHtml(pkg.version || '?')}</span>
-              </div>
-              <span class="badge" style="color: var(--safe); border-color: var(--safe)">OK</span>
-            </div>
-            <div class="item-details">
-              ${pkg.weeklyDownloads ? `<div>Downloads: ${utils.formatNumber(pkg.weeklyDownloads)}/wk</div>` : ''}
-              <div style="margin-top: 5px; color: var(--text-muted)">Found in:</div>
-              ${(pkg.sources || []).map(src => `<div class="source-path">> ${utils.escapeHtml(src)}</div>`).join('')}
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    ` : ''}
-    
-    <div style="text-align: center; margin-top: 60px; color: var(--text-muted); font-size: 12px;">
-      Generated by NPM Security Scanner Pro<br>
-      Made by <a href="https://bugcrowd.com/h/Bytes_Knight" target="_blank" style="color: var(--accent-primary); text-decoration: none;">@Bytes_Knight</a>
-      | <a href="https://github.com/bytes-Knight" target="_blank" style="color: var(--accent-primary); text-decoration: none;" title="GitHub">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align: middle;">
-          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-        </svg>
-      </a>
-    </div>
+    ${sectionMarkup || '<p>No findings detected in this scan.</p>'}
   </div>
 </body>
 </html>`;
 }
+
+document.addEventListener('DOMContentLoaded', async () => {
+  bindEventListeners();
+
+  chrome.storage.local.get(['extensionEnabled'], async (storage) => {
+    const isEnabled = storage.extensionEnabled !== false;
+    updateToggleState(isEnabled);
+
+    if (!isEnabled) {
+      UIRenderer.renderDisabled();
+      return;
+    }
+
+    await PopupScanManager.refresh(false);
+  });
+});
