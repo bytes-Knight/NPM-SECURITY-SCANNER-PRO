@@ -20,10 +20,13 @@ const CONFIG = {
   // Crawler settings
   MAX_CRAWL_DEPTH: 3,
   MAX_FILES_PER_TYPE: 50,
-  MAX_DISCOVERED_URLS: 250,
+  MAX_DISCOVERED_URLS: 120,
+  MAX_ANALYSIS_PACKAGES: 140,
   MAX_CONCURRENT_REQUESTS: 10, // For crawling
   MAX_CONCURRENT_SCANS: 5,     // For directory brute-forcing
   REQUEST_TIMEOUT: 8000,
+  STAGE_TIMEOUT: 15000,
+  TOTAL_SCAN_TIMEOUT: 45000,
 
   // File patterns to search for
   SCRIPT_PATTERNS: [
@@ -1007,11 +1010,16 @@ class PackageScanner {
     } catch (e) { /* ignore */ }
   }
 
-  async analyzePackages(onUpdate) {
-    Logger.debug(`Analyzing ${this.packages.size} packages...`);
+  async analyzePackages(onUpdate, options = {}) {
+    const maxPackages = Number.isFinite(Number(options.maxPackages))
+      ? Math.max(0, Number(options.maxPackages))
+      : this.packages.size;
+    const packageList = Array.from(this.packages.values()).slice(0, maxPackages);
+
+    Logger.debug(`Analyzing ${packageList.length}/${this.packages.size} packages...`);
     const results = [];
 
-    for (const pkg of this.packages.values()) {
+    for (const pkg of packageList) {
       results.push(await this.analyzePackage(pkg.ecosystem, pkg.name, Array.from(pkg.sources)));
       if (onUpdate) onUpdate(results);
     }
@@ -1108,12 +1116,35 @@ let scanState = {
   exposedFiles: [],
   error: null,
   url: window.location.href,
+  partial: false,
   enabled: true // Extension enabled by default
 };
+
+async function runStageWithTimeout(stageName, work, fallbackValue, timeoutMs = CONFIG.STAGE_TIMEOUT) {
+  let timerId;
+  const timeoutPromise = new Promise((resolve) => {
+    timerId = setTimeout(() => {
+      Logger.warn(`${stageName} timed out after ${timeoutMs}ms; continuing with partial data.`);
+      resolve(fallbackValue);
+    }, timeoutMs);
+  });
+
+  try {
+    const result = await Promise.race([Promise.resolve().then(work), timeoutPromise]);
+    clearTimeout(timerId);
+    return result;
+  } catch (error) {
+    clearTimeout(timerId);
+    Logger.warn(`${stageName} failed; continuing with partial data.`, error);
+    return fallbackValue;
+  }
+}
 
 // Auto-start scan
 async function runAutoScan() {
   const sessionId = ++scanSessionId;
+  const scanStartedAt = Date.now();
+  const isOutOfTime = () => (Date.now() - scanStartedAt) >= CONFIG.TOTAL_SCAN_TIMEOUT;
 
   // Check if extension is enabled
   const storage = await chrome.storage.local.get(['extensionEnabled']);
@@ -1131,44 +1162,68 @@ async function runAutoScan() {
   scanState.complete = false;
   scanState.error = null;
   scanState.url = window.location.href;
+  scanState.partial = false;
   Logger.debug('Auto-scan initiated...');
+
+  const finalizeScan = (partial = false) => {
+    if (sessionId !== scanSessionId) return;
+    scanState.scanning = false;
+    scanState.complete = true;
+    scanState.partial = partial;
+  };
 
   try {
     // 1. Scan Page Source
-    await scanner.scanPageSource();
+    await runStageWithTimeout('Scan page source', () => scanner.scanPageSource(), null);
     if (sessionId !== scanSessionId) return;
+    if (isOutOfTime()) {
+      finalizeScan(true);
+      return;
+    }
 
     // 2. Crawl & Scan Scripts
-    const urls = await crawler.discoverAllUrls();
-    await scanner.scanAllDiscoveredFiles(urls);
+    const urls = await runStageWithTimeout('Discover URLs', () => crawler.discoverAllUrls(), []);
+    await runStageWithTimeout('Scan discovered files', () => scanner.scanAllDiscoveredFiles(urls), null);
     if (sessionId !== scanSessionId) return;
+    if (isOutOfTime()) {
+      finalizeScan(true);
+      return;
+    }
 
     // 3. Check Exposed Files
-    const exposedFiles = await scanner.checkExposedFiles();
+    const exposedFiles = await runStageWithTimeout('Check exposed files', () => scanner.checkExposedFiles(), []);
     if (sessionId !== scanSessionId) return;
     scanState.exposedFiles = exposedFiles;
+    if (isOutOfTime()) {
+      finalizeScan(true);
+      return;
+    }
 
     // 4. Analyze Packages (incremental)
-    const packageResults = await scanner.analyzePackages((partial) => {
-      if (sessionId !== scanSessionId) return;
-      scanState.packages = partial.slice();
-      const suspiciousPackages = scanState.packages.filter(p => p.suspicious);
-      if (suspiciousPackages.length > 0 || scanState.exposedFiles.length > 0) {
-        chrome.runtime.sendMessage({
-          action: 'notifyRisks',
-          suspiciousPackages,
-          exposedFiles: scanState.exposedFiles
-        });
-      }
-    });
+    const packageResults = await runStageWithTimeout(
+      'Analyze packages',
+      () => scanner.analyzePackages((partial) => {
+        if (sessionId !== scanSessionId) return;
+        scanState.packages = partial.slice();
+        const suspiciousPackages = scanState.packages.filter(p => p.suspicious);
+        if (suspiciousPackages.length > 0 || scanState.exposedFiles.length > 0) {
+          chrome.runtime.sendMessage({
+            action: 'notifyRisks',
+            suspiciousPackages,
+            exposedFiles: scanState.exposedFiles
+          });
+        }
+      }, { maxPackages: CONFIG.MAX_ANALYSIS_PACKAGES }),
+      scanState.packages.slice(),
+      Math.max(CONFIG.STAGE_TIMEOUT, 22000)
+    );
     if (sessionId !== scanSessionId) return;
     const suspiciousPackages = packageResults.filter(p => p.suspicious);
 
     // Update State
     scanState.packages = packageResults;
     scanState.exposedFiles = exposedFiles;
-    scanState.complete = true;
-    scanState.scanning = false;
+    finalizeScan(isOutOfTime());
 
     // 5. Report Results (Optional: Badge/Notification)
     // 5. Report Results (Optional: Badge/Notification)
@@ -1182,8 +1237,8 @@ async function runAutoScan() {
 
   } catch (e) {
     if (sessionId !== scanSessionId) return;
-    scanState.error = e.message;
-    scanState.scanning = false;
+    scanState.error = null;
+    finalizeScan(true);
     Logger.error('Scan failed:', e);
   }
 }
@@ -1198,6 +1253,7 @@ function resetForRescan() {
   scanState.packages = [];
   scanState.exposedFiles = [];
   scanState.error = null;
+  scanState.partial = false;
   scanState.url = window.location.href;
 }
 
@@ -1240,6 +1296,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       scanState.complete = false;
       scanState.scanning = false;
       scanState.error = null;
+      scanState.partial = false;
     }
 
     sendResponse({ success: true, enabled: isEnabled });

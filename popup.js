@@ -8,11 +8,16 @@ const elements = {
   targetUrl: document.getElementById('targetUrl'),
   scanResults: document.getElementById('scanResults'),
   statsGrid: document.getElementById('statsGrid'),
-  statPackages: document.getElementById('statPackages'),
-  statRisks: document.getElementById('statRisks'),
-  statFiles: document.getElementById('statFiles'),
-  statRiskCard: document.getElementById('statRiskCard'),
-  statFilesCard: document.getElementById('statFilesCard'),
+  statCritical: document.getElementById('statCritical'),
+  statHigh: document.getElementById('statHigh'),
+  statMedium: document.getElementById('statMedium'),
+  statTotal: document.getElementById('statTotal'),
+  ecoNpm: document.getElementById('ecoNpm'),
+  ecoPypi: document.getElementById('ecoPypi'),
+  ecoGems: document.getElementById('ecoGems'),
+  ecoGo: document.getElementById('ecoGo'),
+  ecoCargo: document.getElementById('ecoCargo'),
+  ecoPhp: document.getElementById('ecoPhp'),
   actionControls: document.getElementById('actionControls'),
   filterControls: document.getElementById('filterControls'),
   rescanBtn: document.getElementById('rescanBtn'),
@@ -35,6 +40,7 @@ const SECTION_META = {
 };
 
 const SECTION_ORDER = ['critical', 'high', 'medium', 'low', 'error'];
+const MAX_POLL_ATTEMPTS_WITHOUT_RESPONSE = 12;
 
 const state = {
   rawResults: null,
@@ -43,6 +49,7 @@ const state = {
   },
   filters: { search: '', severity: 'ALL' },
   pollTimer: null,
+  pollAttempts: 0,
   activeTabId: null,
   extensionEnabled: true,
   lastRenderedScanning: false,
@@ -135,12 +142,77 @@ class ScanDataModel {
   static calculateStats(results) {
     const packages = Array.isArray(results?.packages) ? results.packages : [];
     const exposedFiles = Array.isArray(results?.exposedFiles) ? results.exposedFiles : [];
-    const criticalRisks = packages.filter((pkg) => pkg && pkg.isUnregistered).length + exposedFiles.length;
+    const ecosystems = {
+      npm: 0,
+      pypi: 0,
+      gems: 0,
+      go: 0,
+      cargo: 0,
+      php: 0
+    };
+
+    let critical = 0;
+    let high = 0;
+    let medium = 0;
+    let low = 0;
+    let error = 0;
+
+    packages.forEach((pkg) => {
+      if (!pkg) return;
+
+      const ecosystem = String(pkg.ecosystem || 'npm').toLowerCase();
+      if (ecosystem === 'npm') ecosystems.npm += 1;
+      else if (ecosystem === 'pypi') ecosystems.pypi += 1;
+      else if (ecosystem === 'rubygems') ecosystems.gems += 1;
+      else if (ecosystem === 'golang') ecosystems.go += 1;
+      else if (ecosystem === 'crates') ecosystems.cargo += 1;
+      else if (ecosystem === 'composer') ecosystems.php += 1;
+
+      if (pkg.error) {
+        error += 1;
+        return;
+      }
+
+      if (pkg.isUnregistered) {
+        critical += 1;
+        return;
+      }
+
+      const level = String(pkg.riskLevel || '').toUpperCase();
+      if (level === 'HIGH') {
+        high += 1;
+      } else if (level === 'MEDIUM') {
+        medium += 1;
+      } else {
+        low += 1;
+      }
+    });
+
+    exposedFiles.forEach((file) => {
+      if (!file) return;
+      const risk = String(file.risk || '').toUpperCase();
+      if (risk === 'HIGH') {
+        high += 1;
+      } else if (risk === 'MEDIUM') {
+        medium += 1;
+      } else {
+        low += 1;
+      }
+    });
+
+    const totalFindings = critical + high + medium + low + error;
 
     return {
       totalPackages: packages.length,
-      criticalRisks,
-      exposedFileCount: exposedFiles.length
+      exposedFileCount: exposedFiles.length,
+      criticalRisks: critical,
+      critical,
+      high,
+      medium,
+      low,
+      error,
+      totalFindings,
+      ecosystems
     };
   }
 
@@ -450,16 +522,21 @@ class UIRenderer {
     }
 
     const stats = ScanDataModel.calculateStats(results);
-    elements.statPackages.textContent = stats.totalPackages.toString();
-    elements.statRisks.textContent = stats.criticalRisks.toString();
-    elements.statFiles.textContent = stats.exposedFileCount.toString();
-    elements.statRiskCard.className = `stat-card ${stats.criticalRisks > 0 ? 'critical' : 'safe'}`;
-    elements.statFilesCard.className = 'stat-card files';
+    elements.statCritical.textContent = stats.critical.toString();
+    elements.statHigh.textContent = stats.high.toString();
+    elements.statMedium.textContent = stats.medium.toString();
+    elements.statTotal.textContent = stats.totalFindings.toString();
+    elements.ecoNpm.textContent = stats.ecosystems.npm.toString();
+    elements.ecoPypi.textContent = stats.ecosystems.pypi.toString();
+    elements.ecoGems.textContent = stats.ecosystems.gems.toString();
+    elements.ecoGo.textContent = stats.ecosystems.go.toString();
+    elements.ecoCargo.textContent = stats.ecosystems.cargo.toString();
+    elements.ecoPhp.textContent = stats.ecosystems.php.toString();
 
     this.toggleDataControls(true);
     elements.copySummaryBtn.disabled = !ScanDataModel.hasAnyData(results);
     elements.saveResultsBtn.disabled = !ScanDataModel.hasAnyData(results);
-    this.setStatus(scanning ? 'SCANNING...' : 'SCAN COMPLETE');
+    this.setStatus(scanning ? 'SCANNING...' : (results.partial ? 'PARTIAL RESULTS' : 'SCAN COMPLETE'));
 
     const allSections = ScanDataModel.buildSections(results);
     const filteredSections = ScanDataModel.filterSections(allSections, state.filters);
@@ -622,6 +699,7 @@ const PopupScanManager = {
 
   async pollStatus(tabId, options = {}) {
     this.clearPolling();
+    state.pollAttempts = 0;
 
     const initialLoadingMessage = options.initialLoadingMessage || 'Loading scan status...';
     UIRenderer.renderLoading(initialLoadingMessage);
@@ -631,9 +709,16 @@ const PopupScanManager = {
         const response = await this.sendMessage(tabId, { action: 'getScanStatus' });
 
         if (!response) {
+          state.pollAttempts += 1;
+          if (state.pollAttempts >= MAX_POLL_ATTEMPTS_WITHOUT_RESPONSE) {
+            UIRenderer.renderError('Scanner not responding on this page', 'Try refreshing the page or opening another website.');
+            return true;
+          }
           UIRenderer.renderLoading('Waiting for content script. Refresh the target page.');
           return false;
         }
+
+        state.pollAttempts = 0;
 
         if (response.enabled === false) {
           updateToggleState(false);
@@ -670,6 +755,11 @@ const PopupScanManager = {
       } catch (error) {
         const message = String(error && error.message ? error.message : 'Unknown error');
         if (message.includes('Could not establish connection') || message.includes('Receiving end does not exist')) {
+          state.pollAttempts += 1;
+          if (state.pollAttempts >= MAX_POLL_ATTEMPTS_WITHOUT_RESPONSE) {
+            UIRenderer.renderError('Scanner did not initialize in time', 'Refresh the target page, then reopen the extension.');
+            return true;
+          }
           UIRenderer.renderLoading('Content script not ready. Refresh the page.');
           return false;
         }
@@ -989,6 +1079,11 @@ function generateHtmlReport(data) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  document.documentElement.style.width = '560px';
+  document.documentElement.style.minWidth = '560px';
+  document.body.style.width = '560px';
+  document.body.style.minWidth = '560px';
+
   bindEventListeners();
 
   chrome.storage.local.get(['extensionEnabled'], async (storage) => {
