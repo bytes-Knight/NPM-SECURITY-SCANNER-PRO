@@ -1,0 +1,43 @@
+# Build artifacts / public mirror
+public/
+
+# Test files & scratch
+test_extraction.js
+test_scan.html
+Untitled-1.txt
+
+# Screenshots accidentally dropped at the project root
+/[0-9]*-*.png
+*.png
+!icon16.png
+!icon48.png
+!icon128.png
+
+# Dependencies
+node_modules/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env / secrets
+.env
+.env.local
+.env.*.local
+
+# OS temp
+$RECYCLE.BIN/

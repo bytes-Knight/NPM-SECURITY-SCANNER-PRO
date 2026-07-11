@@ -1,0 +1,7 @@
+{
+  "name": "internal-lib",
+  "version": "2.4.1",
+  "secret": "internal-pypi-secret",
+  "message": "Loaded from private PyPI",
+  "source": "private PyPI index"
+}

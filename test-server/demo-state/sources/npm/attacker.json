@@ -1,0 +1,7 @@
+{
+  "name": "@acme/internal-config",
+  "version": "99.0.0",
+  "secret": "attacker-npm-secret",
+  "message": "Loaded from public npm (attacker)",
+  "source": "public npm"
+}

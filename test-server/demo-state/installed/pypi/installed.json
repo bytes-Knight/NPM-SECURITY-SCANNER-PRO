@@ -1,0 +1,7 @@
+{
+  "name": "internal-lib",
+  "version": "9.9.9",
+  "secret": "attacker-pypi-secret",
+  "message": "Loaded from public PyPI (attacker)",
+  "source": "public PyPI"
+}

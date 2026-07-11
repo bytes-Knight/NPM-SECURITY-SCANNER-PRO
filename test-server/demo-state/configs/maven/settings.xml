@@ -1,0 +1,9 @@
+<settings>
+  <mirrors>
+    <mirror>
+      <id>acme-internal</id>
+      <mirrorOf>*</mirrorOf>
+      <url>https://maven.acme.local/repository/internal</url>
+    </mirror>
+  </mirrors>
+</settings>

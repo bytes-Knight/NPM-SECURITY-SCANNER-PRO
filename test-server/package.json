@@ -1,0 +1,20 @@
+{
+  "name": "dependency-confusion-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local server that shows how dependency confusion can inject a malicious package",
+  "scripts": {
+    "start": "node server.js",
+    "simulate-attack": "node scripts/replace-dependency.js",
+    "reset-dependency": "node scripts/reset-dependency.js",
+    "sanity-check": "node scripts/sanity-check.js",
+    "ci-simulate": "node scripts/ci-simulate.js --mode defense",
+    "toggle-attack": "node scripts/ci-simulate.js --mode attack",
+    "toggle-defense": "node scripts/ci-simulate.js --mode defense"
+  },
+  "dependencies": {
+    "@acme/internal-config": "file:packages/internal-config",
+    "express": "^4.22.1",
+    "so": "^1.0.1"
+  }
+}

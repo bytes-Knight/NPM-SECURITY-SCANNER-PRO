@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security Scanner Pro</title>
+  <style>html, body { width: 480px; }</style>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body class="theme-dark">
+  <div class="app" id="mainView">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">NS</div>
+        <div class="brand-text">
+          <div class="brand-name">Scanner Pro</div>
+          <div class="brand-sub">v3.1.0 · Neo Security</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="themeBtn" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+          <span id="themeIcon">☾</span>
+        </button>
+        <button id="settingsBtn" class="icon-btn" title="Settings" aria-label="Settings">
+          <span>⚙</span>
+        </button>
+        <label class="toggle" title="Enable/disable scanner">
+          <input type="checkbox" id="extensionToggle" checked>
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </header>
+
+    <div class="target-bar">
+      <span class="target-label">Target</span>
+      <span id="targetUrl" class="target-url" title="—">—</span>
+    </div>
+
+    <div class="progress" id="progressWrap" hidden>
+      <div class="progress-bar">
+        <div class="progress-bar-fill" id="progressFill"></div>
+      </div>
+      <div class="progress-text" id="progressText">Initializing…</div>
+    </div>
+
+    <div class="risk-meter" id="riskMeter" hidden>
+      <div class="risk-row">
+        <div class="risk-label">
+          <span class="risk-title">Risk</span>
+          <span id="riskScore" class="risk-value">0</span>
+        </div>
+        <div class="risk-track">
+          <div class="risk-fill" id="riskFill"></div>
+        </div>
+      </div>
+      <div class="risk-stats">
+        <span class="risk-stat critical"><b id="riskCrit">0</b> missing</span>
+        <span class="risk-stat low"><b id="riskLow">0</b> safe</span>
+        <span class="risk-stat vulns" id="vulnsStat" hidden><b id="riskVulns">0</b> ⬢ cve</span>
+      </div>
+      <div class="ecosystem-strip" id="ecoStrip" hidden></div>
+    </div>
+
+    <div class="controls" id="controls" hidden>
+      <div class="filter-row">
+        <input type="search" id="searchInput" placeholder="Search packages, sources, IDs…" class="search-input">
+        <select id="severityFilter" class="severity-select" aria-label="Severity filter">
+          <option value="ALL">All</option>
+          <option value="CRITICAL">Missing</option>
+          <option value="LOW">Safe</option>
+          <option value="ERROR">Errors</option>
+        </select>
+      </div>
+      <div class="action-row">
+        <button id="rescanBtn" class="btn btn-primary" type="button">↻ Rescan</button>
+        <button id="copyBadBtn" class="btn" type="button" disabled title="Copy missing/unregistered findings only">Copy Bad</button>
+        <button id="copyAllBtn" class="btn" type="button" disabled title="Copy full summary">Copy All</button>
+        <button id="saveBtn" class="btn" type="button" disabled title="Save HTML report">↓ Save</button>
+      </div>
+    </div>
+
+    <main class="results" id="results">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">⌖</div>
+        <div class="empty-title" id="emptyTitle">Waiting for scan</div>
+        <div class="empty-text" id="emptyText">Open a target page and keep this popup open while scanning starts.</div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span class="footer-tag">NS Pro</span>
+      <a href="https://bugcrowd.com/h/Bytes_Knight" target="_blank" rel="noreferrer">@Bytes_Knight</a>
+    </footer>
+  </div>
+
+  <div class="settings-panel" id="settingsPanel" hidden>
+    <div class="settings-header">
+      <button id="settingsBackBtn" class="icon-btn" aria-label="Back to main">←</button>
+      <h2>Settings</h2>
+    </div>
+    <div class="settings-body">
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-name">OSV Advisory Lookup</div>
+          <div class="setting-desc">Cross-reference every package with OSV.dev (CVEs / GHSAs).</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="settingOsv" checked>
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-name">Deep Crawl</div>
+          <div class="setting-desc">Follow service workers, webpack chunks, import maps.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="settingDeepCrawl" checked>
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-name">Auto-scan on page load</div>
+          <div class="setting-desc">Run the scanner automatically on every page.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="settingAutoScan" checked>
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-name">Theme</div>
+          <div class="setting-desc">Dark or light interface.</div>
+        </div>
+        <select id="settingTheme" class="severity-select" aria-label="Theme">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

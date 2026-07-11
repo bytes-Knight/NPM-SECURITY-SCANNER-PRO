@@ -1,0 +1,8 @@
+{
+  "groupId": "com.acme",
+  "artifactId": "internal-lib",
+  "version": "99.9.9",
+  "secret": "attacker-maven-secret",
+  "message": "Loaded from public Maven Central (attacker)",
+  "source": "public Maven Central"
+}

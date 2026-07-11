@@ -1,0 +1,8 @@
+{
+  "groupId": "com.acme",
+  "artifactId": "internal-lib",
+  "version": "3.2.0",
+  "secret": "internal-maven-secret",
+  "message": "Loaded from private Maven repo",
+  "source": "private Maven repository"
+}

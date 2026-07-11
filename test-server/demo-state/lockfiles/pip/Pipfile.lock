@@ -1,0 +1,24 @@
+{
+  "_meta": {
+    "hash": {
+      "sha256": "demo"
+    },
+    "pipfile-spec": 6,
+    "requires": {
+      "python_version": "3.11"
+    },
+    "sources": [
+      {
+        "name": "pypi",
+        "url": "https://pypi.acme.local/simple",
+        "verify_ssl": true
+      }
+    ]
+  },
+  "default": {
+    "internal-lib": {
+      "version": "==2.4.1"
+    }
+  },
+  "develop": {}
+}

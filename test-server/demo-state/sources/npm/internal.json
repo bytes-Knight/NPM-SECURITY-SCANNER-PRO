@@ -1,0 +1,7 @@
+{
+  "name": "@acme/internal-config",
+  "version": "1.0.0",
+  "secret": "internal-npm-secret",
+  "message": "Loaded from private npm registry",
+  "source": "private npm registry"
+}
